@@ -1,6 +1,8 @@
 === ML Media Master ===
-Stable tag: 2.9.59.0
+Stable tag: 2.9.60.0
 
+
+2.9.60.0 - Atualizações automáticas passam a vir do repositório público de releases (ml-media-master-releases); o código-fonte passa a ser privado. Ícones do plugin na tela de atualizações. Nenhuma outra mudança de comportamento.
 
 2.9.59.0 - Correção definitiva do atualizador automático GitHub/WordPress: adicionado Update URI oficial; integração nativa update_plugins_github.com; cache migrado para site transient com revalidação ETag/Last-Modified; o botão Verificar novamente agora invalida imediatamente o cache próprio; transient update_plugins já armazenado também é reparado; seleção do pacote exige o asset ZIP versionado exato da release e nunca aceita ZIP arbitrário ou source archive; respostas de update/no_update incluem metadados de compatibilidade; limpeza pós-update cobre atualização individual e em lote; removido o renomeador pós-instalação frágil. Slug, pasta raiz, arquivo principal, configurações, licença, conversão WordPress e integração ML Gallery Pro preservados.
 

@@ -3,8 +3,8 @@
  * Plugin Name: ML Media Master
  * Plugin URI: https://mlopesdesign.com.br
  * Description: ML Media Master para WordPress: converte JPG, JPEG e PNG para WebP automaticamente no upload (WordPress e ML Gallery Pro). GIF nunca convertido. Licença Free/Full por serial.
- * Version: 2.9.59.0
- * Update URI: https://github.com/mlopesdesign/ml-media-master
+ * Version: 2.9.60.0
+ * Update URI: https://github.com/mlopesdesign/ml-media-master-releases
  * Requires at least: 6.0
  * Requires PHP: 8.1
  * Author: Marcio Lopes
@@ -22,7 +22,7 @@ require_once __DIR__ . '/includes/class-mlmm-updater.php';
 
 final class ML_Media_Master {
         private const OPTION_KEY = 'ml_media_master_settings';
-        private const VERSION = '2.9.59.0';
+        private const VERSION = '2.9.60.0';
         private const LICENSE_OPTION = 'ml_media_master_license_state';
         private const LICENSE_SERVER_URL = 'https://license.mlopesdesign.com.br/api/license.php';
         private const PRODUCT_ID = 'ml-media-master';
