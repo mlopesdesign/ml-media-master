@@ -15,10 +15,11 @@ defined('ABSPATH') || exit;
 final class MLMM_Updater {
 
 	private const GITHUB_OWNER        = 'mlopesdesign';
-	private const GITHUB_REPO         = 'ml-media-master';
+	// Repositorio PUBLICO so com os ZIPs; o codigo-fonte e privado (API responde 404 sem token).
+	private const GITHUB_REPO         = 'ml-media-master-releases';
 	private const PLUGIN_SLUG         = 'ml-media-master';
-	private const UPDATE_URI          = 'https://github.com/mlopesdesign/ml-media-master';
-	private const API_URL             = 'https://api.github.com/repos/mlopesdesign/ml-media-master/releases/latest';
+	private const UPDATE_URI          = 'https://github.com/mlopesdesign/ml-media-master-releases';
+	private const API_URL             = 'https://api.github.com/repos/mlopesdesign/ml-media-master-releases/releases/latest';
 	private const TRANSIENT_KEY       = 'mlmm_github_release_cache';
 	private const CACHE_TTL           = 1800; // Revalidate every 30 minutes.
 	private const ERROR_RETRY_TTL     = 300;  // Retry API failures after 5 minutes.
@@ -164,6 +165,7 @@ final class MLMM_Updater {
 		$info->requires      = self::REQUIRES_WORDPRESS;
 		$info->requires_php  = self::REQUIRES_PHP;
 		$info->external      = true;
+		$info->icons         = $this->icons();
 		$info->sections      = [
 			'description' => 'ML Media Master: conversão automática de JPG, JPEG e PNG para WebP no upload do WordPress e do ML Gallery Pro. GIF nunca é convertido.',
 			'changelog'   => nl2br(esc_html((string) ($release['body'] ?? ''))),
@@ -372,7 +374,7 @@ final class MLMM_Updater {
 			'package'      => $is_update && is_array($release) ? (string) ($release['package_url'] ?? '') : '',
 			'requires'     => self::REQUIRES_WORDPRESS,
 			'requires_php' => self::REQUIRES_PHP,
-			'icons'        => [],
+			'icons'        => $this->icons(),
 			'banners'      => [],
 			'banners_rtl'  => [],
 		];
@@ -395,10 +397,20 @@ final class MLMM_Updater {
 			'package'       => $is_update && is_array($release) ? (string) ($release['package_url'] ?? '') : '',
 			'requires'      => self::REQUIRES_WORDPRESS,
 			'requires_php'  => self::REQUIRES_PHP,
-			'icons'         => [],
+			'icons'         => $this->icons(),
 			'banners'       => [],
 			'banners_rtl'   => [],
 			'compatibility' => new stdClass(),
+		];
+	}
+
+	/** @return array<string,string> */
+	private function icons(): array {
+		$base = plugin_dir_url($this->plugin_file) . 'assets/images/';
+		return [
+			'1x'      => $base . 'icon-128x128.png',
+			'2x'      => $base . 'icon-256x256.png',
+			'default' => $base . 'icon-256x256.png',
 		];
 	}
 

@@ -10,6 +10,12 @@ with this file.
 
 ---
 
+## [2.9.60.0] - 2026-10-14
+
+### Changed
+- Updater consulta `ml-media-master-releases` (público, só ZIPs); `Update URI` e URL confiável do asset atualizados. Código-fonte passa a ser privado.
+- Ícones no transient, no `update_plugins_github.com` e no `plugins_api`.
+
 ## [2.9.59.0] - 2026-06-27
 
 ### Fixed
