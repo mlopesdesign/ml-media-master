@@ -69,3 +69,7 @@ foreach ($mlmm_legacy_options as $option_name) {
 }
 
 delete_transient('ml_media_master_batch_notice');
+
+// 2.10.0: licença pelo site tools — a licença local fica (reinstalar recupera); só a
+// renovação diária é desagendada.
+wp_clear_scheduled_hook('mllc_ml_media_master_refresh');

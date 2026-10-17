@@ -2,8 +2,8 @@
 /**
  * Plugin Name: ML Media Master
  * Plugin URI: https://mlopesdesign.com.br
- * Description: ML Media Master para WordPress: converte JPG, JPEG e PNG para WebP automaticamente no upload (WordPress e ML Gallery Pro). GIF nunca convertido. Licença Free/Full por serial.
- * Version: 2.9.60.0
+ * Description: ML Media Master para WordPress: converte JPG, JPEG e PNG para WebP automaticamente no upload (WordPress e ML Gallery Pro). GIF nunca convertido. Licença pelo site tools.mlopesdesign.com.br (teste grátis de 30 dias).
+ * Version: 2.10.0
  * Update URI: https://github.com/mlopesdesign/ml-media-master-releases
  * Requires at least: 6.0
  * Requires PHP: 8.1
@@ -19,14 +19,11 @@ if (!defined('ABSPATH')) {
 
 require_once __DIR__ . '/includes/class-mlmm-gallery-pro.php';
 require_once __DIR__ . '/includes/class-mlmm-updater.php';
+require_once __DIR__ . '/includes/class-mlmm-license.php';
 
 final class ML_Media_Master {
         private const OPTION_KEY = 'ml_media_master_settings';
-        private const VERSION = '2.9.60.0';
-        private const LICENSE_OPTION = 'ml_media_master_license_state';
-        private const LICENSE_SERVER_URL = 'https://license.mlopesdesign.com.br/api/license.php';
-        private const PRODUCT_ID = 'ml-media-master';
-        private const LICENSE_CACHE_TTL = 21600;
+        private const VERSION = '2.10.0';
         private const ADMIN_TOAST_TRANSIENT = 'ml_media_master_admin_toast';
         private const VERSION_SEEN_OPTION = 'ml_media_master_version_seen';
 
@@ -93,9 +90,12 @@ final class ML_Media_Master {
                 $this->settings = $this->get_settings();
                 $this->gallery_pro_compat = class_exists('MLMM_Gallery_Pro_Compat') ? new MLMM_Gallery_Pro_Compat($this) : null;
 
+                // Licença pelo ML License Hub (tools.mlopesdesign.com.br). Sem licença só a
+                // gravação das configurações trava; a otimização continua.
+                MLMM_License::boot(self::VERSION);
+
                 add_action('admin_menu', [$this, 'register_admin_menu']);
                 add_action('admin_init', [$this, 'register_settings']);
-                add_action('admin_init', [$this, 'maybe_handle_license_actions']);
                 add_action('admin_enqueue_scripts', [$this, 'enqueue_admin_assets']);
                 add_action('template_redirect', [$this, 'maybe_redirect_missing_upload_to_webp'], 1);
 
@@ -461,388 +461,85 @@ final class ML_Media_Master {
 
 
         /**
-         * @return array<string, mixed>
+         * Aba Licença (ML License Hub). Mesmo visual das outras abas do plugin.
          */
-        private function get_default_license_state(): array {
-                return [
-                        'mode' => 'free',
-                        'valid' => false,
-                        'status' => 'free',
-                        'message' => 'Versão Free ativa. Informe um serial para liberar todos os recursos.',
-                        'license_key' => '',
-                        'plan' => 'free',
-                        'domain' => '',
-                        'site_url' => site_url(),
-                        'checked_at' => '',
-                        'expires_at' => '',
-                        'grace_until' => '',
-                        'days_left' => '',
-                        'license_source' => 'free',
-                        'site_fingerprint' => '',
-                        'premium' => 0,
-                        'trial_started' => 0,
-                ];
-        }
-
-        /**
-         * @return array<string, mixed>
-         */
-        private function get_license_state(): array {
-                $saved = get_option(self::LICENSE_OPTION, []);
-                if (!is_array($saved)) {
-                        $saved = [];
-                }
-
-                return array_merge($this->get_default_license_state(), $saved);
-        }
-
-        /**
-         * @param array<string, mixed> $state
-         */
-        private function save_license_state(array $state): void {
-                $state = array_merge($this->get_default_license_state(), $state);
-                update_option(self::LICENSE_OPTION, $state, false);
-        }
-
-        private function has_premium_access(): bool {
-                $state = $this->get_license_state();
-                $status = strtolower((string) ($state['status'] ?? ''));
-                $plan = strtolower((string) ($state['plan'] ?? ''));
-                $premium_flag = !empty($state['premium']);
-                $valid = !empty($state['valid']);
-                $license_source = strtolower((string) ($state['license_source'] ?? ''));
-                $trial_started = !empty($state['trial_started']);
-                $expires_at = trim((string) ($state['expires_at'] ?? ''));
-
-                if ($status === 'trial_active') {
-                        return true;
-                }
-
-                if ($trial_started && in_array($license_source, ['server_trial', 'trial', 'license_hub_trial'], true)) {
-                        if ($expires_at === '') {
-                                return true;
-                        }
-
-                        $expires_ts = strtotime($expires_at);
-                        if ($expires_ts !== false && $expires_ts >= current_time('timestamp')) {
-                                return true;
-                        }
-                }
-
-                if (in_array($status, ['active', 'lifetime'], true) && $valid) {
-                        return true;
-                }
-
-                if ($premium_flag && in_array($status, ['active', 'trial_active', 'lifetime'], true)) {
-                        return true;
-                }
-
-                return $valid && in_array($plan, ['full', 'premium', 'lifetime', 'trial'], true) && !in_array($status, ['expired', 'trial_expired', 'blocked', 'invalid', 'free'], true);
-        }
-
-        private function is_full_license_active(): bool {
-                return $this->has_premium_access();
-        }
-
-        private function get_site_fingerprint(): string {
-                return hash('sha256', strtolower($this->get_current_domain_for_license()) . '|' . site_url() . '|' . home_url() . '|' . ABSPATH);
-        }
-
-        private function get_license_api_action(string $license_key): string {
-                return trim($license_key) !== '' ? 'validate_license' : 'start_trial';
-        }
-
-        private function get_plan_label(string $plan): string {
-                $plan = strtolower($plan);
-                $map = [
-                        'free' => 'Free',
-                        'trial' => 'Trial',
-                        'full' => 'Full',
-                        'premium' => 'Premium',
-                        'lifetime' => 'Vitalício',
-                ];
-
-                return $map[$plan] ?? ucfirst($plan);
-        }
-
-        private function get_status_label(string $status): string {
-                $status = strtolower($status);
-                $map = [
-                        'free' => 'Free ativo',
-                        'trial_active' => 'Trial ativo',
-                        'trial_expired' => 'Trial expirado',
-                        'active' => 'Licença ativa',
-                        'lifetime' => 'Vitalícia ativa',
-                        'expired' => 'Licença expirada',
-                        'blocked' => 'Bloqueada',
-                        'domain_mismatch' => 'Domínio divergente',
-                        'inactive' => 'Inativa',
-                        'bad_request' => 'Dados incompletos',
-                        'error' => 'Erro de conexão',
-                        'invalid' => 'Inválida',
-                        'not_found' => 'Não encontrada',
-                        'deactivated' => 'Desativada',
-                ];
-
-                return $map[$status] ?? ucfirst(str_replace('_', ' ', $status));
-        }
-
-        private function get_current_domain_for_license(): string {
-                $host = wp_parse_url(site_url(), PHP_URL_HOST);
-                return strtolower((string) $host);
-        }
-
-        /**
-         * @return array<string, mixed>
-         */
-        private function validate_license_remote(string $license_key): array {
-                $license_key = trim($license_key);
-                if ($license_key === '') {
-                        return [
-                                'valid' => false,
-                                'status' => 'missing_key',
-                                'message' => 'Informe um serial para validar a licença.',
-                        ];
-                }
-
-                $response = wp_remote_post(
-                        self::LICENSE_SERVER_URL,
-                        [
-                                'timeout' => 20,
-                                'redirection' => 3,
-                                'headers' => [
-                                        'Accept' => 'application/json',
-                                ],
-                                'body' => [
-                                        'action' => $this->get_license_api_action($license_key),
-                                        'product_id' => self::PRODUCT_ID,
-                                        'license_key' => $license_key,
-                                        'domain' => $this->get_current_domain_for_license(),
-                                        'site_url' => site_url(),
-                                        'home_url' => home_url(),
-                                        'version' => self::VERSION,
-                                        'admin_email' => get_option('admin_email', ''),
-                                        'site_fingerprint' => $this->get_site_fingerprint(),
-                                ],
-                        ]
-                );
-
-                if (is_wp_error($response)) {
-                        return [
-                                'valid' => false,
-                                'status' => 'request_failed',
-                                'message' => 'Falha ao conectar ao servidor de licenças: ' . $response->get_error_message(),
-                        ];
-                }
-
-                $code = (int) wp_remote_retrieve_response_code($response);
-                $body = (string) wp_remote_retrieve_body($response);
-                $body = preg_replace('/^ï»¿/', '', $body);
-                $body = trim((string) $body);
-                $data = json_decode($body, true);
-
-                if (!is_array($data) && $body !== '') {
-                        if (preg_match('/\{(?:[^{}]|(?R))*\}/s', $body, $matches)) {
-                                $decoded_fragment = json_decode((string) $matches[0], true);
-                                if (is_array($decoded_fragment)) {
-                                        $data = $decoded_fragment;
-                                }
-                        }
-                }
-
-                if (!is_array($data) && $body !== '') {
-                        $json_start = strpos($body, '{');
-                        $json_end = strrpos($body, '}');
-                        if ($json_start !== false && $json_end !== false && $json_end > $json_start) {
-                                $json_fragment = substr($body, $json_start, ($json_end - $json_start + 1));
-                                $decoded_fragment = json_decode($json_fragment, true);
-                                if (is_array($decoded_fragment)) {
-                                        $data = $decoded_fragment;
-                                }
-                        }
-                }
-
-                if (!is_array($data)) {
-                        $body_preview = trim(wp_strip_all_tags($body));
-                        if ($body_preview !== '') {
-                                $body_preview = function_exists('mb_substr') ? mb_substr($body_preview, 0, 220) : substr($body_preview, 0, 220);
-                        }
-
-                        return [
-                                'valid' => false,
-                                'status' => 'invalid_response',
-                                'message' => 'Resposta inválida do servidor de licenças. HTTP ' . $code . ($body_preview !== '' ? ' | Retorno: ' . $body_preview : ' | Retorno vazio.'),
-                                'http_code' => $code,
-                                'raw_body' => $body,
-                        ];
-                }
-
-                if (isset($data['success']) && !isset($data['valid']) && !isset($data['status'])) {
-                        $success = !empty($data['success']);
-                        $data = [
-                                'valid' => $success,
-                                'status' => $success ? 'active' : 'invalid',
-                                'message' => isset($data['message']) ? (string) $data['message'] : ($success ? 'Licença validada com sucesso.' : 'Licença inválida.'),
-                                'plan' => isset($data['plan']) ? (string) $data['plan'] : ($success ? 'full' : 'free'),
-                                'domain' => isset($data['domain']) ? (string) $data['domain'] : $this->get_current_domain_for_license(),
-                        ];
-                }
-
-                $data['http_code'] = $code;
-                return $data;
-        }
-
-        public function maybe_handle_license_actions(): void {
-                if (!is_admin() || !current_user_can('manage_options')) {
-                        return;
-                }
-
-                if (!isset($_GET['page']) || $_GET['page'] !== 'ml-media-master') {
-                        return;
-                }
-
-                $action = isset($_POST['mlmm_license_action']) ? sanitize_text_field((string) $_POST['mlmm_license_action']) : '';
-                if ($action === '') {
-                        return;
-                }
-
-                check_admin_referer('mlmm_license_action_nonce');
-
-                if ($action === 'deactivate_license') {
-                        $this->save_license_state($this->get_default_license_state());
-                        $this->set_admin_toast(true, $this->t('Licença removida deste site. A versão Free continua ativa.', 'License removed from this site. The Free version remains active.', 'Licencia eliminada de este sitio. La versión Free sigue activa.'));
-                        $this->redirect_to_plugin_page('licenca');
-                        return;
-                }
-
-                if ($action === 'validate_license' || $action === 'validate' || $action === 'sync_license') {
-                        $saved_state = $this->get_license_state();
-                        $license_key = isset($_POST['mlmm_license_key']) ? sanitize_text_field((string) $_POST['mlmm_license_key']) : (string) ($saved_state['license_key'] ?? '');
-
-                        if ($action === 'sync_license' && trim($license_key) === '') {
-                                $now_ts = current_time('timestamp');
-                                $expires_ts = strtotime('+30 days', $now_ts);
-                                $state = [
-                                        'mode' => 'full',
-                                        'valid' => true,
-                                        'status' => 'trial_active',
-                                        'message' => 'Trial ativo neste site.',
-                                        'license_key' => '',
-                                        'plan' => 'trial',
-                                        'domain' => $this->get_current_domain_for_license(),
-                                        'site_url' => site_url(),
-                                        'checked_at' => current_time('mysql'),
-                                        'expires_at' => date_i18n('Y-m-d H:i:s', $expires_ts),
-                                        'grace_until' => '',
-                                        'days_left' => '30',
-                                        'license_source' => 'server_trial',
-                                        'site_fingerprint' => $this->get_site_fingerprint(),
-                                        'premium' => 1,
-                                        'trial_started' => 1,
-                                ];
-                                $this->save_license_state($state);
-                                $this->set_admin_toast(true, $state['message']);
-                                $this->redirect_to_plugin_page('licenca');
-                        }
-
-                        $result = $this->validate_license_remote($license_key);
-                        $status = isset($result['status']) ? sanitize_key((string) $result['status']) : (!empty($result['valid']) ? 'active' : 'invalid');
-                        $plan = isset($result['plan']) && $result['plan'] !== '' ? sanitize_text_field((string) $result['plan']) : (!empty($result['valid']) ? ($status === 'trial_active' ? 'trial' : 'full') : 'free');
-                        $premium = !empty($result['premium']) || $status === 'trial_active' || in_array($plan, ['full', 'premium', 'lifetime', 'trial'], true);
-                        $state = [
-                                'mode' => $premium ? 'full' : 'free',
-                                'valid' => !empty($result['valid']) || $status === 'trial_active',
-                                'status' => $status,
-                                'message' => isset($result['message']) ? (string) $result['message'] : '',
-                                'license_key' => $license_key,
-                                'plan' => $plan,
-                                'domain' => isset($result['domain']) ? (string) $result['domain'] : $this->get_current_domain_for_license(),
-                                'site_url' => site_url(),
-                                'checked_at' => current_time('mysql'),
-                                'expires_at' => isset($result['expires_at']) ? (string) $result['expires_at'] : '',
-                                'grace_until' => isset($result['grace_until']) ? (string) $result['grace_until'] : '',
-                                'days_left' => isset($result['days_left']) ? (string) $result['days_left'] : '',
-                                'license_source' => isset($result['license_source']) ? (string) $result['license_source'] : ($license_key !== '' ? 'license' : 'server_trial'),
-                                'site_fingerprint' => $this->get_site_fingerprint(),
-                                'premium' => $premium ? 1 : 0,
-                                'trial_started' => $status === 'trial_active' ? 1 : (!empty($saved_state['trial_started']) ? 1 : 0),
-                        ];
-                        $this->save_license_state($state);
-                        $ok = !empty($state['valid']) || in_array($status, ['free', 'trial_expired'], true);
-                        $this->set_admin_toast($ok, $state['message'] !== '' ? $state['message'] : 'Sincronização da licença concluída.');
-                        $this->redirect_to_plugin_page('licenca');
-                }
-        }
-        private function get_feature_matrix(): array {
-                return [
-                        ['label' => 'Conversão automática para WebP no upload', 'free' => $this->t('Sim', 'Yes', 'Sí'), 'full' => $this->t('Sim', 'Yes', 'Sí')],
-                        ['label' => 'Integração ML Gallery Pro', 'free' => $this->t('Sim', 'Yes', 'Sí'), 'full' => $this->t('Sim', 'Yes', 'Sí')],
-                        ['label' => 'Fallback de URL antiga para WebP', 'free' => $this->t('Sim', 'Yes', 'Sí'), 'full' => $this->t('Sim', 'Yes', 'Sí')],
-                        ['label' => $this->t('Suporte prioritário', 'Priority support', 'Soporte prioritario'), 'free' => $this->t('Não', 'No', 'No'), 'full' => $this->t('Sim', 'Yes', 'Sí')],
-                ];
-        }
-
         private function render_license_panel(): void {
-                $state = $this->get_license_state();
-                $premium = $this->has_premium_access();
-                $plan_label = $this->get_plan_label((string) ($state['plan'] ?? 'free'));
-                $status_label = $this->get_status_label((string) ($state['status'] ?? 'free'));
-                $days_left = isset($state['days_left']) && $state['days_left'] !== '' ? (int) $state['days_left'] : null;
-                $license_source = !empty($state['license_source']) ? (string) $state['license_source'] : 'free';
-                $fingerprint = !empty($state['site_fingerprint']) ? (string) $state['site_fingerprint'] : $this->get_site_fingerprint();
+                $lic      = MLMM_License::summary();
+                $post_url = esc_url(admin_url('admin-post.php'));
+                $days     = $lic['days_left'];
+
+                if ($lic['active'] && $lic['expires_label'] !== '' && !$lic['is_lifetime']) {
+                        $valid_until = $lic['expires_label'];
+                } else {
+                        $valid_until = $lic['active'] ? 'Sem vencimento' : '—';
+                }
+                $days_label = ($lic['active'] && null !== $days && $lic['expires_label'] !== '' && !$lic['is_lifetime']) ? (string) (int) $days : '—';
 
                 echo '<section class="mlmm-tab-panel" data-tab-panel="licenca">';
                 echo '<div class="mlmm-grid mlmm-grid-4" style="margin-bottom:16px;">';
-                echo '<div class="mlmm-summary-card"><span class="mlmm-summary-label">Plano atual</span><strong>' . esc_html($plan_label) . '</strong><small>' . esc_html($premium ? 'Todos os recursos liberados' : 'Modo Free operacional por padrão') . '</small></div>';
-                echo '<div class="mlmm-summary-card"><span class="mlmm-summary-label">Status</span><strong>' . esc_html($status_label) . '</strong><small>' . esc_html((string) ($state['status'] ?? 'free')) . '</small></div>';
-                echo '<div class="mlmm-summary-card"><span class="mlmm-summary-label">Premium</span><strong>' . esc_html($premium ? 'Liberado' : 'Limitado') . '</strong><small>' . esc_html($premium ? 'Trial/Full/Vitalício com recursos completos' : 'Upgrade libera recursos completos e suporte prioritário') . '</small></div>';
-                echo '<div class="mlmm-summary-card"><span class="mlmm-summary-label">Dias restantes</span><strong>' . esc_html($days_left !== null ? (string) $days_left : '—') . '</strong><small>' . esc_html(!empty($state['expires_at']) ? (string) $state['expires_at'] : 'Sem expiração informada') . '</small></div>';
+                echo '<div class="mlmm-summary-card"><span class="mlmm-summary-label">Situação</span><strong>' . esc_html($lic['label']) . '</strong><small>' . esc_html($lic['active'] ? 'Painel liberado para alterar as configurações' : 'Configurações só para leitura') . '</small></div>';
+                echo '<div class="mlmm-summary-card"><span class="mlmm-summary-label">Plano</span><strong>' . esc_html($lic['plan_label']) . '</strong><small>' . esc_html('Licença pelo site tools.mlopesdesign.com.br') . '</small></div>';
+                echo '<div class="mlmm-summary-card"><span class="mlmm-summary-label">Válida até</span><strong>' . esc_html($valid_until) . '</strong><small>' . esc_html('Conferida uma vez por dia') . '</small></div>';
+                echo '<div class="mlmm-summary-card"><span class="mlmm-summary-label">Dias restantes</span><strong>' . esc_html($days_label) . '</strong><small>' . esc_html('A otimização nunca para por falta de licença') . '</small></div>';
                 echo '</div>';
 
                 echo '<div class="mlmm-grid mlmm-grid-2">';
                 echo '<div class="mlmm-card">';
-                echo '<div class="mlmm-card-header"><div><h2>Licença</h2><p class="mlmm-muted">Ative uma licença Full/Vitalícia ou sincronize o site com o Hub para receber Trial de 30 dias e depois degradar com elegância para Free.</p></div><div class="mlmm-chip">' . esc_html($status_label) . '</div></div>';
-                echo '<div class="mlmm-grid mlmm-grid-2">';
-                echo '<div class="mlmm-card mlmm-card-inline"><strong>Produto</strong><div>ML Media Master</div></div>';
-                echo '<div class="mlmm-card mlmm-card-inline"><strong>Product ID</strong><div>' . esc_html(self::PRODUCT_ID) . '</div></div>';
-                echo '<div class="mlmm-card mlmm-card-inline"><strong>Domínio atual</strong><div>' . esc_html($this->get_current_domain_for_license()) . '</div></div>';
-                echo '<div class="mlmm-card mlmm-card-inline"><strong>Site fingerprint</strong><div style="word-break:break-all;">' . esc_html($fingerprint) . '</div></div>';
-                echo '<div class="mlmm-card mlmm-card-inline"><strong>Origem</strong><div>' . esc_html($license_source) . '</div></div>';
-                echo '<div class="mlmm-card mlmm-card-inline"><strong>Última validação</strong><div>' . esc_html((string) (($state['checked_at'] ?? '') ?: '—')) . '</div></div>';
-                echo '<div class="mlmm-card mlmm-card-inline"><strong>Expira em</strong><div>' . esc_html((string) (($state['expires_at'] ?? '') ?: '—')) . '</div></div>';
-                echo '</div>';
-                echo '<form method="post" style="margin-top:14px;">';
-                wp_nonce_field('mlmm_license_action_nonce');
-                echo '<input type="hidden" name="mlmm_license_action" value="validate_license">';
-                echo '<p><label for="mlmm-license-key"><strong>Serial / License Key</strong></label><br><input id="mlmm-license-key" type="text" name="mlmm_license_key" value="' . esc_attr((string) ($state['license_key'] ?? '')) . '" class="regular-text" style="width:100%;max-width:420px" placeholder="MLI-XXXXX-XXXXX-XXXXX-XXXXX"></p>';
-                echo '<p style="display:flex;gap:10px;flex-wrap:wrap;">';
-                echo '<button type="submit" class="button button-primary">Ativar licença</button>';
-                echo '</p>';
-                echo '</form>';
-                echo '<form method="post" style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap;">';
-                wp_nonce_field('mlmm_license_action_nonce');
-                echo '<input type="hidden" name="mlmm_license_action" value="sync_license">';
-                echo '<input type="hidden" name="mlmm_license_key" value="' . esc_attr((string) ($state['license_key'] ?? '')) . '">';
-                echo '<button type="submit" class="button">Iniciar / sincronizar Trial</button>';
-                if (!empty($state['license_key']) || !empty($state['trial_started'])) {
-                        echo '<button type="submit" name="mlmm_license_action" value="deactivate_license" class="button">Remover licença deste site</button>';
+                echo '<div class="mlmm-card-header"><div><h2>Licença</h2><p class="mlmm-muted">' . esc_html($lic['message']) . '</p></div><div class="mlmm-chip">' . esc_html($lic['domain']) . '</div></div>';
+
+                if ('license' === $lic['mode'] && '' !== $lic['key_masked']) {
+                        echo '<div class="mlmm-card mlmm-card-inline"><strong>Chave neste site</strong><div>' . esc_html($lic['key_masked']) . '</div></div>';
+                        echo '<div class="mlmm-license-actions">';
+                        echo '<form method="post" action="' . $post_url . '">';
+                        wp_nonce_field('mlmm_sync_license');
+                        echo '<input type="hidden" name="action" value="mlmm_sync_license"><input type="hidden" name="mlmm_op" value="check">';
+                        echo '<button type="submit" class="button button-primary">Conferir agora</button>';
+                        echo '</form>';
+                        echo '<form method="post" action="' . $post_url . '">';
+                        wp_nonce_field('mlmm_remove_license');
+                        echo '<input type="hidden" name="action" value="mlmm_remove_license">';
+                        echo '<button type="submit" class="button">Remover deste site</button>';
+                        echo '</form>';
+                        echo '</div>';
+                } else {
+                        echo '<form method="post" action="' . $post_url . '">';
+                        wp_nonce_field('mlmm_activate_license');
+                        echo '<input type="hidden" name="action" value="mlmm_activate_license">';
+                        echo '<p><label for="mlmm-license-key"><strong>Chave da licença</strong></label><br><input id="mlmm-license-key" type="text" name="license_key" value="" class="regular-text" style="width:100%;max-width:420px" placeholder="Cole aqui a sua chave" autocomplete="off" spellcheck="false"></p>';
+                        echo '<p><button type="submit" class="button button-primary">Ativar licença</button></p>';
+                        echo '</form>';
+                        echo '<div class="mlmm-license-actions">';
+                        if ($lic['can_start_trial']) {
+                                echo '<form method="post" action="' . $post_url . '">';
+                                wp_nonce_field('mlmm_sync_license');
+                                echo '<input type="hidden" name="action" value="mlmm_sync_license"><input type="hidden" name="mlmm_op" value="trial">';
+                                echo '<button type="submit" class="button">Começar teste grátis de 30 dias</button>';
+                                echo '</form>';
+                        } elseif ($lic['is_trial']) {
+                                echo '<form method="post" action="' . $post_url . '">';
+                                wp_nonce_field('mlmm_sync_license');
+                                echo '<input type="hidden" name="action" value="mlmm_sync_license"><input type="hidden" name="mlmm_op" value="check">';
+                                echo '<button type="submit" class="button">Conferir agora</button>';
+                                echo '</form>';
+                        }
+                        echo '</div>';
                 }
-                echo '</form>';
+
+                echo '<div class="mlmm-license-actions">';
+                echo '<a class="button" href="' . esc_url(MLMM_License::BUY_URL) . '" target="_blank" rel="noopener noreferrer">Comprar licença</a>';
+                echo '<a class="button" href="' . esc_url(MLMM_License::ACCOUNT_URL) . '" target="_blank" rel="noopener noreferrer">Minha conta</a>';
+                echo '</div>';
                 echo '</div>';
 
                 echo '<div class="mlmm-card">';
-                echo '<div class="mlmm-card-header"><div><h2>Planos</h2><p class="mlmm-muted">Comparativo comercial direto para upgrade do cliente final, sem alterar a configuração salva do site.</p></div><div class="mlmm-chip">Free / Trial / Full / Vitalício</div></div>';
-                echo '<table class="widefat striped"><thead><tr><th>Recurso</th><th>Free</th><th>Trial</th><th>Full / Vitalício</th></tr></thead><tbody>';
-                foreach ($this->get_feature_matrix() as $row) {
-                        $trial_value = (string) ($row['full'] ?? 'Sim');
-                        echo '<tr><td>' . esc_html((string) $row['label']) . '</td><td>' . esc_html((string) $row['free']) . '</td><td>' . esc_html($trial_value) . '</td><td>' . esc_html((string) $row['full']) . '</td></tr>';
-                }
+                echo '<div class="mlmm-card-header"><div><h2>Como funciona</h2><p class="mlmm-muted">Licença emitida e conferida pelo site tools.mlopesdesign.com.br.</p></div><div class="mlmm-chip">tools.mlopesdesign.com.br</div></div>';
+                echo '<table class="widefat striped"><tbody>';
+                echo '<tr><td><strong>Teste grátis</strong></td><td>30 dias com tudo liberado, uma vez por site. Reinstalar não reinicia.</td></tr>';
+                echo '<tr><td><strong>Licença anual</strong></td><td>Vale em 1 site. Para usar em outro, remova deste site.</td></tr>';
+                echo '<tr><td><strong>Pacote Agência</strong></td><td>Uma chave para todos os plugins ML em 5, 10 ou 50 sites.</td></tr>';
+                echo '<tr><td><strong>Sem licença</strong></td><td>A otimização continua: novas imagens seguem virando WebP e o site continua mostrando as imagens otimizadas. Só as configurações ficam bloqueadas para alterar. Nada é apagado.</td></tr>';
                 echo '</tbody></table>';
-                echo '<p style="margin-top:12px;">A tabela acima é comercial. Ela não altera a configuração salva do site e não reescreve seu lote atual.</p>';
-                echo '<p style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;">';
-                echo '<a class="button button-primary" href="https://mlopesdesign.com.br" target="_blank" rel="noopener noreferrer">Assinar / Comprar agora</a>';
-                echo '<a class="button" href="https://mlopesdesign.com.br" target="_blank" rel="noopener noreferrer">Abrir site oficial</a>';
-                echo '</p>';
+                echo '<p class="mlmm-muted" style="margin-top:12px;">A licença é conferida uma vez por dia. Sem internet, o site continua liberado por até 7 dias.</p>';
                 echo '</div>';
                 echo '</div>';
                 echo '</section>';
@@ -880,9 +577,9 @@ final class ML_Media_Master {
 
                 return [
                         'message' => $this->t(
-                                'ML Media Master ' . self::VERSION . ' instalado. Atualização automática corrigida: o botão Verificar novamente agora consulta a release atual do GitHub sem ficar preso ao cache anterior.',
-                                'ML Media Master ' . self::VERSION . ' installed. Automatic updates fixed: Check again now queries the current GitHub release instead of remaining stuck on stale cache.',
-                                'ML Media Master ' . self::VERSION . ' instalado. Actualización automática corregida: Verificar de nuevo ahora consulta la release actual de GitHub sin quedar atrapado en la caché anterior.'
+                                'ML Media Master ' . self::VERSION . ' instalado. A licença agora é feita pelo site tools.mlopesdesign.com.br, com teste grátis de 30 dias. A otimização das imagens continua igual.',
+                                'ML Media Master ' . self::VERSION . ' installed. Licensing now runs through tools.mlopesdesign.com.br, with a 30-day free trial. Image optimization works as before.',
+                                'ML Media Master ' . self::VERSION . ' instalado. La licencia ahora se gestiona en tools.mlopesdesign.com.br, con prueba gratuita de 30 días. La optimización de imágenes sigue igual.'
                         ),
                         'type'    => 'success',
                         'timeout' => 10000,
@@ -923,8 +620,12 @@ final class ML_Media_Master {
                 echo '<button type="button" class="mlmm-tab-button is-active" data-tab="dashboard" role="tab" aria-selected="true">Dashboard</button>';
                 echo '<button type="button" class="mlmm-tab-button' . (!$this->is_mlgp_available() ? ' is-disabled' : '') . '" data-tab="mlgallery" role="tab" aria-selected="false"' . (!$this->is_mlgp_available() ? ' disabled="disabled" aria-disabled="true"' : '') . '>ML Gallery Pro</button>';
                 echo '<button type="button" class="mlmm-tab-button" data-tab="configuracoes" role="tab" aria-selected="false">Configurações</button>';
-                echo '<button type="button" class="mlmm-tab-button" data-tab="licenca" role="tab" aria-selected="false">Licença e Planos</button>';
+                echo '<button type="button" class="mlmm-tab-button" data-tab="licenca" role="tab" aria-selected="false">Licença</button>';
                 echo '</div>';
+
+                if (MLMM_License::is_locked()) {
+                        MLMM_License::render_locked_notice();
+                }
 
                 echo '<div class="mlmm-tab-panels">';
 
@@ -961,7 +662,12 @@ final class ML_Media_Master {
                 echo '<form method="post" action="options.php">';
                 settings_fields('ml_media_master_group');
                 do_settings_sections('ml-media-master');
-                submit_button($this->t('Salvar configurações', 'Save settings', 'Guardar configuración'));
+                if (MLMM_License::is_locked()) {
+                        echo '<p class="mlmm-muted">' . esc_html(MLMM_License::locked_message()) . '</p>';
+                        submit_button($this->t('Salvar configurações', 'Save settings', 'Guardar configuración'), 'primary', 'submit', true, ['disabled' => 'disabled']);
+                } else {
+                        submit_button($this->t('Salvar configurações', 'Save settings', 'Guardar configuración'));
+                }
                 echo '</form>';
                 echo '</div>';
                 echo '</section>';

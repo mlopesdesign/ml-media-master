@@ -1,6 +1,8 @@
 === ML Media Master ===
-Stable tag: 2.9.60.0
+Stable tag: 2.10.0
 
+
+2.10.0 - Licença pelo site tools.mlopesdesign.com.br (ML License Hub). O servidor antigo license.mlopesdesign.com.br não é mais consultado. Aceita a chave do Pacote Agência (todos os plugins ML em vários sites). Teste grátis de 30 dias por site; quem já usava o plugin recebe o teste automaticamente na primeira visita ao painel. Sem teste ou licença: só as configurações ficam bloqueadas para alterar; a conversão para WebP no upload (WordPress e ML Gallery Pro), as imagens otimizadas no site e o redirecionamento de uploads antigos continuam funcionando, e nada é apagado. Aba Licença refeita, sem campos de servidor, Product ID e fingerprint.
 
 2.9.60.0 - Atualizações automáticas passam a vir do repositório público de releases (ml-media-master-releases); o código-fonte passa a ser privado. Ícones do plugin na tela de atualizações. Nenhuma outra mudança de comportamento.
 

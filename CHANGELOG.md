@@ -10,6 +10,15 @@ with this file.
 
 ---
 
+## [2.10.0] - 2026-10-17
+
+### Changed
+- Licença pelo site tools.mlopesdesign.com.br (ML License Hub, cliente `ML_License_Client_V2` em `includes/class-ml-license-client.php`; integração em `includes/class-mlmm-license.php`). O servidor antigo `license.mlopesdesign.com.br/api/license.php` não é mais chamado; a option antiga `ml_media_master_license_state` fica no banco.
+- Aceita a chave do Pacote Agência. Teste grátis de 30 dias por site, iniciado sozinho na primeira visita ao painel (`mlmm_auto_trial_tried`).
+- Sem teste/licença: só a gravação das configurações trava (options.php + `pre_update_option_ml_media_master_settings`). Conversão WebP no upload, ML Gallery Pro, troca de URLs no front-end e redirecionamento de uploads antigos continuam.
+- Aba Licença refeita (sem servidor, Product ID e fingerprint); aviso discreto no painel quando sem licença; links `#mlmm-tab-<aba>` abrem a aba certa.
+- `uninstall.php` desagenda a renovação diária (`mllc_ml_media_master_refresh`); a licença local fica.
+
 ## [2.9.60.0] - 2026-10-14
 
 ### Changed

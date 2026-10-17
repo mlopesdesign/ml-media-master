@@ -39,6 +39,19 @@
       $('.mlmm-tab-panel[data-tab-panel="' + target + '"]').addClass('is-active');
     });
 
+    // Links internos para uma aba (ex.: aviso "Ativar licença") e #mlmm-tab-<aba> na URL.
+    $(document).on('click', '.mlmm-tab-link', function (e) {
+      var target = $(this).data('tab');
+      if (target) {
+        e.preventDefault();
+        $('.mlmm-tab-button[data-tab="' + target + '"]').trigger('click');
+      }
+    });
+    var hashTab = (window.location.hash || '').match(/^#mlmm-tab-([a-z0-9_-]+)$/i);
+    if (hashTab) {
+      $('.mlmm-tab-button[data-tab="' + hashTab[1] + '"]').trigger('click');
+    }
+
     // Deferred toast (settings saved, license actions).
     var $deferred = $('#mlmm-deferred-toast');
     if ($deferred.length) {
