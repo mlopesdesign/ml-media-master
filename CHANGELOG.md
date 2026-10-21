@@ -10,6 +10,11 @@ with this file.
 
 ---
 
+## [2.10.1] - 2026-10-21
+
+### Corrigido
+- Crítico: com o plugin ativo sozinho (sem outro plugin ML que carregasse o cliente de licença antes), o site inteiro caía com "Class ML_License_Client_V2 not found". O cliente de licença agora é carregado sempre.
+
 ## [2.10.0] - 2026-10-17
 
 ### Changed
