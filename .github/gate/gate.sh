@@ -86,15 +86,16 @@ test_round(){ # test_round <rótulo>
 if [ -n "$PREV" ] && [ -f "$PREV" ]; then
   unzip -q "$PREV" -d "$PL"; SAVED=$FAIL; test_round "versão anterior $OLDV (base — só referência, não reprova)"
   FAILBASE=$FAIL; FAIL=$SAVED; : > "$LOG"
-  WASACTIVE=0; wp plugin is-active "$SLUG" 2>/dev/null && WASACTIVE=1
+  # --skip-plugins: a troca de versão não carrega o código do plugin (uma versão anterior quebrada derrubaria o WP-CLI e a atualização seria testada com o código velho).
+  WASACTIVE=0; wp --skip-plugins plugin is-active "$SLUG" 2>/dev/null && WASACTIVE=1
   echo "-- atualização $OLDV → $NEWV pelo instalador do WordPress"
-  wp plugin install "$ZIP" --force --quiet 2>"$WORK/up.err" || bad "instalação da atualização falhou: $(head -c 300 "$WORK/up.err")"
+  wp --skip-plugins plugin install "$ZIP" --force --quiet 2>"$WORK/up.err" || bad "instalação da atualização falhou: $(head -c 300 "$WORK/up.err")"
   dirs=$(ls "$PL" | grep -vxE 'sqlite-database-integration|index\.php' | tr '\n' ' ')
   [ "$dirs" = "$SLUG " ] && ok "atualizou na mesma pasta ($SLUG/), sem instalação nova" || bad "pastas após atualização: $dirs"
-  [ "$(wp plugin get "$SLUG" --field=version 2>/dev/null)" = "$NEWV" ] && ok "versão instalada $NEWV" || bad "versão instalada difere"
-  if [ $WASACTIVE -eq 1 ]; then wp plugin is-active "$SLUG" 2>/dev/null && ok "continuou ativo após atualizar" || bad "ficou inativo após atualizar"; fi
+  [ "$(wp --skip-plugins plugin get "$SLUG" --field=version 2>/dev/null)" = "$NEWV" ] && ok "versão instalada $NEWV" || bad "versão instalada difere"
+  if [ $WASACTIVE -eq 1 ]; then wp --skip-plugins plugin is-active "$SLUG" 2>/dev/null && ok "continuou ativo após atualizar" || bad "ficou inativo após atualizar"; fi
   fatal_check "atualização"
-  wp plugin deactivate "$SLUG" --quiet 2>/dev/null; : > "$LOG"
+  wp --skip-plugins plugin deactivate "$SLUG" --quiet 2>/dev/null; : > "$LOG"
   [ $FAILBASE -ne $SAVED ] && echo "  (aviso: a versão anterior publicada tem falhas — esta versão precisa corrigi-las)"
 else
   unzip -q "$ZIP" -d "$PL"
