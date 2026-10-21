@@ -1,0 +1,37 @@
+name: ML Release Gate
+
+# Trava obrigatoria antes de publicar: monta o ZIP no mesmo formato do release publicado
+# em ml-media-master-releases e testa o plugin SOZINHO em WordPress limpo. Nao cria release.
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Montar ZIP (mesmo formato do release publicado)
+        id: zip
+        run: |
+          set -euo pipefail
+          V=$(grep -E '^\s*\*\s*Version:' ml-media-master/ml-media-master.php | head -1 | sed -E 's/.*Version:\s*([0-9.]+).*/\1/')
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$V" ]; then echo "::error::Tag $GITHUB_REF_NAME difere do Version: $V"; exit 1; fi
+          mkdir -p dist
+          find ml-media-master -type d -exec chmod 755 {} +
+          find ml-media-master -type f -exec chmod 644 {} +
+          zip -qrX "dist/ml-media-master-v$V.zip" ml-media-master -x "*.DS_Store" "*Thumbs.db" "*Desktop.ini" "*.zip" "*/node_modules/*"
+          echo "zip=dist/ml-media-master-v$V.zip" >> "$GITHUB_OUTPUT"
+
+      - name: ML Release Gate (plugin sozinho, identidade, atualizacao na mesma pasta)
+        env:
+          GATE_MODE: ${{ github.ref_type == 'tag' && 'release' || 'pr' }}
+        run: bash .github/gate/gate.sh ml-media-master ${{ steps.zip.outputs.zip }}
