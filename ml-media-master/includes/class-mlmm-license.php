@@ -24,11 +24,15 @@ if (!defined('ABSPATH')) {
         exit;
 }
 
+// O cliente de licença é carregado ANTES da guarda abaixo: o PHP declara a classe deste
+// arquivo já na compilação, então class_exists() é sempre verdadeiro aqui e o return
+// impediria o carregamento do cliente (erro fatal quando nenhum outro plugin ML o carregou).
+require_once __DIR__ . '/class-ml-license-client.php';
+
 if (class_exists('MLMM_License')) {
         return;
 }
 
-require_once __DIR__ . '/class-ml-license-client.php';
 
 final class MLMM_License {
         const API_BASE     = 'https://tools.mlopesdesign.com.br/wp-json/mllh/v1';
