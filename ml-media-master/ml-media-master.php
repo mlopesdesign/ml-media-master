@@ -32,6 +32,8 @@ final class ML_Media_Master {
         private const WEBP_QUEUE_LOCK = 'mlmm_webp_queue_lock';
         private const WEBP_QUEUE_MAX = 2000;
         private const WEBP_QUEUE_FAILED_MAX = 5000;
+        private const WEBP_QUEUE_KEPT_OPTION = 'mlmm_webp_queue_kept';
+        private const WEBP_QUEUE_KEPT_MAX = 20000;
         private const WEBP_QUEUE_BATCH = 10;
         private const WEBP_QUEUE_TIME_BUDGET = 20;
         private const WEBP_QUEUE_MAX_ATTEMPTS = 3;
@@ -68,9 +70,21 @@ final class ML_Media_Master {
         private $webp_queue_failed_cache = null;
 
         /**
+         * @var array<string, int>|null
+         */
+        private $webp_queue_kept_cache = null;
+
+        /**
          * @var string|null
          */
         private $uploads_realpath_cache = null;
+
+        /**
+         * Anexos que dividem o mesmo arquivo na rodada atual da fila (podem reaproveitar o WebP).
+         *
+         * @var array<int, int>
+         */
+        private $webp_owner_exempt = [];
 
         private function get_current_language(): string {
                 $locale = function_exists('determine_locale') ? (string) determine_locale() : (string) get_locale();
@@ -955,7 +969,8 @@ final class ML_Media_Master {
                         $redirect_path = '';
                         foreach (['-scaled', '-rotated'] as $suffix) {
                                 $candidate = (string) preg_replace('/\.(jpe?g|png)$/i', $suffix . '.webp', $absolute_path);
-                                if ($this->is_real_webp($candidate)) {
+                                $candidate_info = $this->is_valid_generated_file($candidate) ? @getimagesize($candidate) : false;
+                                if (is_array($candidate_info) && (int) ($candidate_info[2] ?? 0) === IMAGETYPE_WEBP) {
                                         $redirect_path = (string) preg_replace('/\.(jpe?g|png)$/i', $suffix . '.webp', $path);
                                         break;
                                 }
@@ -1072,15 +1087,50 @@ final class ML_Media_Master {
                         return false;
                 }
 
-                if (function_exists('imagecreatefromwebp') && ((int) $info[0] * (int) $info[1]) <= 40000000) {
+                if (function_exists('imagecreatefromwebp') && ((int) $info[0] * (int) $info[1]) <= 16000000) {
                         $image = @imagecreatefromwebp($path);
                         if (!$image) {
                                 return false;
                         }
-                        imagedestroy($image);
+                        unset($image);
                 }
 
                 return true;
+        }
+
+        /**
+         * WebP que já existe e pertence a OUTRO anexo (ex.: logo.png e logo.webp enviados
+         * separados na mesma pasta). Não pode ser reaproveitado como conversão deste anexo.
+         */
+        private function webp_owned_by_other_attachment(string $webp_path, int $attachment_id): bool {
+                global $wpdb;
+
+                if ($webp_path === '' || !file_exists($webp_path)) {
+                        return false;
+                }
+
+                $relative = _wp_relative_upload_path($webp_path);
+                $basename = wp_basename($webp_path);
+                $ids = $wpdb->get_col($wpdb->prepare(
+                        "SELECT DISTINCT post_id FROM {$wpdb->postmeta} WHERE (meta_key = '_wp_attached_file' AND meta_value = %s) OR (meta_key = '_wp_attachment_metadata' AND meta_value LIKE %s)",
+                        $relative,
+                        '%' . $wpdb->esc_like('"' . $basename . '"') . '%'
+                ));
+
+                $exempt = array_map('intval', array_merge([$attachment_id], $this->webp_owner_exempt));
+                $dir = dirname($relative);
+                foreach ((array) $ids as $id) {
+                        $id = (int) $id;
+                        if (in_array($id, $exempt, true)) {
+                                continue;
+                        }
+                        $owner_file = (string) get_post_meta($id, '_wp_attached_file', true);
+                        if ($owner_file === $relative || dirname($owner_file) === $dir) {
+                                return true;
+                        }
+                }
+
+                return false;
         }
 
         private function queue_webp_conversion(string $original_path, string $webp_path): void {
@@ -1105,6 +1155,15 @@ final class ML_Media_Master {
                 }
 
                 if ((int) ($this->webp_queue_failed_cache[$real] ?? 0) >= self::WEBP_QUEUE_MAX_ATTEMPTS) {
+                        return;
+                }
+
+                if ($this->webp_queue_kept_cache === null) {
+                        $kept = get_option(self::WEBP_QUEUE_KEPT_OPTION, []);
+                        $this->webp_queue_kept_cache = is_array($kept) ? $kept : [];
+                }
+
+                if (isset($this->webp_queue_kept_cache[$real])) {
                         return;
                 }
 
@@ -1214,7 +1273,7 @@ final class ML_Media_Master {
                 }
 
                 $webp_file = (string) preg_replace('/\.(jpe?g|png)$/i', '.webp', $attached);
-                if ($webp_file === $attached || !$this->is_real_webp($webp_file)) {
+                if ($webp_file === $attached || !$this->is_real_webp($webp_file) || $this->webp_owned_by_other_attachment($webp_file, $attachment_id)) {
                         return $metadata;
                 }
 
@@ -1240,7 +1299,7 @@ final class ML_Media_Master {
                                 continue;
                         }
                         $sub_webp_name = (string) preg_replace('/\.(jpe?g|png)$/i', '.webp', $size_data['file']);
-                        if ($sub_webp_name !== $size_data['file'] && $this->is_real_webp(trailingslashit($dir) . $sub_webp_name)) {
+                        if ($sub_webp_name !== $size_data['file'] && $this->is_real_webp(trailingslashit($dir) . $sub_webp_name) && !$this->webp_owned_by_other_attachment(trailingslashit($dir) . $sub_webp_name, $attachment_id)) {
                                 $metadata['sizes'][$size_key]['file'] = $sub_webp_name;
                                 $metadata['sizes'][$size_key]['mime-type'] = 'image/webp';
                         }
@@ -1298,7 +1357,9 @@ final class ML_Media_Master {
                 foreach ((array) $ids as $id) {
                         $id = (int) $id;
                         $attached = get_attached_file($id, true);
-                        if (is_string($attached) && in_array(wp_normalize_path($attached), [$path, $path_webp], true)) {
+                        $attached_real = is_string($attached) && file_exists($attached) ? realpath($attached) : false;
+                        $attached_norm = is_string($attached_real) ? wp_normalize_path($attached_real) : (is_string($attached) ? wp_normalize_path($attached) : '');
+                        if ($attached_norm !== '' && in_array($attached_norm, [$path, $path_webp], true)) {
                                 $found[] = $id;
                                 continue;
                         }
@@ -1324,6 +1385,9 @@ final class ML_Media_Master {
 
         public function process_webp_queue(): void {
                 if (!$this->acquire_webp_queue_lock()) {
+                        if (!wp_next_scheduled(self::WEBP_QUEUE_HOOK)) {
+                                wp_schedule_single_event(time() + 120, self::WEBP_QUEUE_HOOK);
+                        }
                         return;
                 }
 
@@ -1370,16 +1434,23 @@ final class ML_Media_Master {
 
                         $ok = $this->convert_queued_original($real, $webp);
 
-                        $failed = $this->get_webp_queue_failed();
                         if ($ok) {
-                                if (file_exists($real)) {
-                                        // Convertido, mas o original fica (fora da biblioteca ou
-                                        // Remoção segura desligada): não volta para a fila.
-                                        $failed[$real] = self::WEBP_QUEUE_MAX_ATTEMPTS;
-                                } else {
-                                        unset($failed[$real]);
-                                }
+                                $failed = $this->get_webp_queue_failed();
+                                unset($failed[$real]);
                                 $this->save_webp_queue_failed($failed);
+
+                                if (file_exists($real)) {
+                                        // Convertido, mas o original fica (Remoção segura desligada):
+                                        // registro próprio, separado das falhas, para não reenfileirar.
+                                        wp_cache_delete(self::WEBP_QUEUE_KEPT_OPTION, 'options');
+                                        $kept = get_option(self::WEBP_QUEUE_KEPT_OPTION, []);
+                                        $kept = is_array($kept) ? $kept : [];
+                                        $kept[$real] = 1;
+                                        if (count($kept) > self::WEBP_QUEUE_KEPT_MAX) {
+                                                $kept = array_slice($kept, -self::WEBP_QUEUE_KEPT_MAX, null, true);
+                                        }
+                                        update_option(self::WEBP_QUEUE_KEPT_OPTION, $kept, false);
+                                }
                         }
                 }
 
@@ -1401,16 +1472,38 @@ final class ML_Media_Master {
          * principal e tamanhos em WebP, banco no WebP, JPG/PNG apagados (Remoção segura). Só conta
          * como sucesso se nenhum anexo continuar apontando para o arquivo da fila.
          *
-         * Fora da biblioteca (ML Gallery Pro antigo, tema, formulários, backups do editor de imagem):
-         * só gera o WebP. Não apaga, porque quem aponta para esse arquivo não é religado aqui.
+         * Fora da biblioteca (arquivo solto em uploads): gera o WebP e apaga o original (Remoção
+         * segura); o redirect 404 leva pedidos antigos ao .webp.
          */
         private function convert_queued_original(string $original, string $webp): bool {
-                $attachment_ids = $this->find_attachment_ids_for_upload_path($original);
+                $filename = wp_basename($original);
+                // Só os anexos que ainda citam ESTE JPG/PNG (o lookup também acha donos do .webp de
+                // mesmo nome, que são outro anexo e não podem ser religados a este arquivo).
+                $attachment_ids = array_values(array_filter(
+                        $this->find_attachment_ids_for_upload_path($original),
+                        function (int $id) use ($filename): bool {
+                                return $this->attachment_references_file($id, $filename);
+                        }
+                ));
 
                 if (empty($attachment_ids)) {
-                        return $this->ensure_webp_exists_from_original($original, $webp) && $this->is_real_webp($webp);
+                        if (file_exists($webp) && $this->webp_owned_by_other_attachment($webp, 0)) {
+                                return false; // o .webp de mesmo nome é de outro anexo.
+                        }
+                        // Arquivo de uploads fora da Biblioteca de Mídia: converte e apaga o JPG/PNG
+                        // (Remoção segura) depois de conferir o WebP; pedidos antigos ao .jpg/.png
+                        // são redirecionados ao .webp. WebP de mesmo nome que não passa na
+                        // conferência nunca é aproveitado.
+                        if (!$this->ensure_webp_exists_from_original($original, $webp) || !$this->is_real_webp($webp)) {
+                                return false;
+                        }
+                        if (!empty($this->settings['delete_original']) && file_exists($original)) {
+                                @unlink($original);
+                        }
+                        return true;
                 }
 
+                $this->webp_owner_exempt = $attachment_ids;
                 foreach ($attachment_ids as $attachment_id) {
                         $metadata = wp_get_attachment_metadata($attachment_id);
                         if (!is_array($metadata)) {
@@ -1439,7 +1532,8 @@ final class ML_Media_Master {
                         }
                 }
 
-                $filename = wp_basename($original);
+                $this->webp_owner_exempt = [];
+
                 foreach ($attachment_ids as $attachment_id) {
                         if ($this->attachment_references_file($attachment_id, $filename)) {
                                 return false;
@@ -1504,6 +1598,10 @@ final class ML_Media_Master {
                         $sub_original = trailingslashit($dir) . $size_data['file'];
                         $sub_webp_name = (string) preg_replace('/\.(jpe?g|png)$/i', '.webp', $size_data['file']);
                         $sub_webp = trailingslashit($dir) . $sub_webp_name;
+
+                        if ($this->webp_owned_by_other_attachment($sub_webp, $attachment_id)) {
+                                continue;
+                        }
 
                         if (file_exists($sub_original)) {
                                 $sub_result = $this->convert_file_to_webp_copy($sub_original, $sub_webp);
@@ -1849,6 +1947,10 @@ final class ML_Media_Master {
                         return $metadata;
                 }
 
+                if ($this->webp_owned_by_other_attachment($webp_file, $attachment_id)) {
+                        return $metadata;
+                }
+
                 $converted_main = $this->convert_existing_file_to_webp_targeted($original_file, $webp_file, false);
                 // 2.10.2: só religa (e depois apaga o original) com WebP decodificável de verdade.
                 if (empty($converted_main['success']) || !$this->is_real_webp($webp_file)) {
@@ -1895,6 +1997,10 @@ final class ML_Media_Master {
                                 $sub_webp_name = (string) preg_replace('/\.(jpe?g|png)$/i', '.webp', $sub_file_name);
                                 $sub_webp = trailingslashit($original_dir) . $sub_webp_name;
                                 if ($sub_webp === $sub_original) {
+                                        continue;
+                                }
+
+                                if ($this->webp_owned_by_other_attachment($sub_webp, $attachment_id)) {
                                         continue;
                                 }
 
@@ -2322,9 +2428,12 @@ final class ML_Media_Master {
                         return $result;
                 }
 
-                // 2.10.2: WebP existente truncado (processo interrompido) é refeito, não aceito.
+                // 2.10.2: WebP já existente que não passa na conferência (truncado, animado ou de
+                // outro arquivo) nunca é apagado nem sobrescrito: a conversão falha e nada muda.
                 if ($this->is_valid_generated_file($final_output) && !$this->is_real_webp($final_output)) {
-                        @unlink($final_output);
+                        $result['status'] = 'existing_webp_unverified';
+                        $result['message'] = 'Já existe um WebP com este nome que não pôde ser conferido; nada foi alterado.';
+                        return $result;
                 }
 
                 if ($this->is_valid_generated_file($final_output)) {
@@ -2452,8 +2561,9 @@ final class ML_Media_Master {
         }
 
         private function ensure_webp_exists_from_original(string $original_path, string $webp_path): bool {
-                if ($webp_path !== '' && file_exists($webp_path) && is_readable($webp_path) && filesize($webp_path) > 0) {
-                        return true;
+                if ($webp_path !== '' && file_exists($webp_path)) {
+                        // 2.10.2: só aceita WebP existente se passar na conferência.
+                        return $this->is_real_webp($webp_path);
                 }
 
                 if ($original_path === '' || !file_exists($original_path) || !is_readable($original_path)) {
@@ -2709,6 +2819,11 @@ final class ML_Media_Master {
                         return ['success' => true, 'already_existed' => true, 'output' => $output];
                 }
 
+                if (file_exists($output)) {
+                        // 2.10.2: nunca sobrescreve um WebP existente que não passou na conferência.
+                        return ['success' => false, 'status' => 'existing_webp_unverified'];
+                }
+
                 $editor = wp_get_image_editor($input);
                 if (is_wp_error($editor)) {
                         return ['success' => false, 'status' => $editor->get_error_code() ?: 'editor_error'];
@@ -2728,7 +2843,7 @@ final class ML_Media_Master {
                 }
 
                 $saved_path = is_array($saved) && !empty($saved['path']) ? (string) $saved['path'] : $temp_output;
-                if (!$this->is_real_webp($saved_path) || !@rename($saved_path, $output)) {
+                if (!$this->is_real_webp($saved_path) || file_exists($output) || !@rename($saved_path, $output)) {
                         @unlink($saved_path);
                         return ['success' => false, 'status' => 'invalid_output'];
                 }
