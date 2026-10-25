@@ -12,6 +12,7 @@ $mlmm_options = [
     'mlmm_webp_queue_failed',
     'mlmm_webp_queue_lock',
     'mlmm_webp_queue_kept',
+    'mlmm_webp_queue_deleted',
 ];
 
 foreach ($mlmm_options as $option_name) {

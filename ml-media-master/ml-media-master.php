@@ -34,6 +34,7 @@ final class ML_Media_Master {
         private const WEBP_QUEUE_FAILED_MAX = 5000;
         private const WEBP_QUEUE_KEPT_OPTION = 'mlmm_webp_queue_kept';
         private const WEBP_QUEUE_KEPT_MAX = 20000;
+        private const WEBP_QUEUE_DELETED_OPTION = 'mlmm_webp_queue_deleted';
         private const WEBP_QUEUE_BATCH = 10;
         private const WEBP_QUEUE_TIME_BUDGET = 20;
         private const WEBP_QUEUE_MAX_ATTEMPTS = 3;
@@ -1498,7 +1499,22 @@ final class ML_Media_Master {
                                 return false;
                         }
                         if (!empty($this->settings['delete_original']) && file_exists($original)) {
-                                @unlink($original);
+                                // Arquivo solto é apagado UMA vez. Se voltar a existir (gerador de
+                                // miniatura sob demanda, ex.: Elementor/Aqua Resizer), fica: senão o
+                                // ciclo apagar → recriar → reenfileirar não terminaria.
+                                wp_cache_delete(self::WEBP_QUEUE_DELETED_OPTION, 'options');
+                                $deleted = get_option(self::WEBP_QUEUE_DELETED_OPTION, []);
+                                $deleted = is_array($deleted) ? $deleted : [];
+                                if (isset($deleted[$original])) {
+                                        return true; // fica no disco; process_webp_queue grava em "kept".
+                                }
+                                if (@unlink($original)) {
+                                        $deleted[$original] = 1;
+                                        if (count($deleted) > self::WEBP_QUEUE_KEPT_MAX) {
+                                                $deleted = array_slice($deleted, -self::WEBP_QUEUE_KEPT_MAX, null, true);
+                                        }
+                                        update_option(self::WEBP_QUEUE_DELETED_OPTION, $deleted, false);
+                                }
                         }
                         return true;
                 }
