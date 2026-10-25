@@ -10,6 +10,7 @@ $mlmm_options = [
     'ml_media_master_version_seen',
     'mlmm_webp_queue',
     'mlmm_webp_queue_failed',
+    'mlmm_webp_queue_lock',
 ];
 
 foreach ($mlmm_options as $option_name) {
@@ -24,7 +25,6 @@ foreach ($mlmm_options as $option_name) {
 $mlmm_transients = [
     'ml_media_master_admin_toast',
     'mlmm_github_release_cache',
-    'mlmm_webp_queue_lock',
 ];
 
 foreach ($mlmm_transients as $transient_name) {

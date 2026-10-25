@@ -20,7 +20,7 @@
 
 ## 2. Estrutura de arquivos
 
-Total: 12 arquivos · 7 de código · 3792 linhas
+Total: 12 arquivos · 7 de código · 4081 linhas
 
 | Arquivo | Linhas | Classes | Métodos | Hooks |
 |---|---|---|---|---|
@@ -29,7 +29,7 @@ Total: 12 arquivos · 7 de código · 3792 linhas
 | includes/class-mlmm-gallery-pro.php | 60 | 1 | 3 | 0 |
 | includes/class-mlmm-license.php | 271 | 1 | 16 | 5 |
 | includes/class-mlmm-updater.php | 506 | 1 | 18 | 7 |
-| ml-media-master.php | 2477 | 1 | 68 | 18 |
+| ml-media-master.php | 2766 | 1 | 76 | 18 |
 | uninstall.php | 82 | 0 | 0 | 0 |
 
 ## 3. Grafo de carregamento
@@ -42,7 +42,7 @@ ml-media-master.php:21 → includes/class-mlmm-updater.php
   includes/class-mlmm-updater.php:376 → s_php' => self::REQUIRES_PHP, 'icons' => $this->icons(), 'banners' => [], 'banners_rtl' =>
 ml-media-master.php:22 → includes/class-mlmm-license.php
   includes/class-mlmm-license.php:30 → includes/class-ml-license-client.php
-ml-media-master.php:2080 → _once ABSPATH . 'wp-admin/includes/file.php'
+ml-media-master.php:2358 → _once ABSPATH . 'wp-admin/includes/file.php'
 ```
 
 ## 4. Constantes
@@ -77,7 +77,8 @@ ml-media-master.php:2080 → _once ABSPATH . 'wp-admin/includes/file.php'
 | WEBP_QUEUE_HOOK | 'mlmm_process_webp_queue' | ml-media-master.php (class const) |
 | WEBP_QUEUE_LOCK | 'mlmm_webp_queue_lock' | ml-media-master.php (class const) |
 | WEBP_QUEUE_MAX | 2000 | ml-media-master.php (class const) |
-| WEBP_QUEUE_BATCH | 15 | ml-media-master.php (class const) |
+| WEBP_QUEUE_FAILED_MAX | 5000 | ml-media-master.php (class const) |
+| WEBP_QUEUE_BATCH | 10 | ml-media-master.php (class const) |
 | WEBP_QUEUE_TIME_BUDGET | 20 | ml-media-master.php (class const) |
 | WEBP_QUEUE_MAX_ATTEMPTS | 3 | ml-media-master.php (class const) |
 | ADMIN_TOAST_TRANSIENT | 'ml_media_master_admin_toast' | ml-media-master.php (class const) |
@@ -101,24 +102,24 @@ ml-media-master.php:2080 → _once ABSPATH . 'wp-admin/includes/file.php'
 | action | `delete_site_transient_update_plugins` | [$this, 'invalidate_release_cache'] | 10 | includes/class-mlmm-updater.php:59 |
 | action | `admin_init` | [$this, 'maybe_invalidate_on_manual_check'] | 1 | includes/class-mlmm-updater.php:60 |
 | action | `upgrader_process_complete` | [$this, 'flush_cache_after_update'] | 10 | includes/class-mlmm-updater.php:61 |
-| action | `admin_menu` | [$this, 'register_admin_menu'] | 10 | ml-media-master.php:119 |
-| action | `admin_init` | [$this, 'register_settings'] | 10 | ml-media-master.php:120 |
-| action | `admin_enqueue_scripts` | [$this, 'enqueue_admin_assets'] | 10 | ml-media-master.php:121 |
-| action | `template_redirect` | [$this, 'maybe_redirect_missing_upload_to_webp'] | 1 | ml-media-master.php:122 |
-| filter | `wp_handle_upload` | [$this, 'process_upload'] | 20 | ml-media-master.php:124 |
-| filter | `wp_generate_attachment_metadata` | [$this, 'fix_metadata_after_webp'] | 20 | ml-media-master.php:125 |
-| filter | `intermediate_image_sizes_advanced` | [$this, 'filter_intermediate_sizes'] | 999 | ml-media-master.php:127 |
-| filter | `big_image_size_threshold` | [$this, 'filter_big_image_threshold'] | 999 | ml-media-master.php:128 |
-| filter | `wp_get_attachment_url` | [$this, 'filter_attachment_url_to_webp'] | 20 | ml-media-master.php:130 |
-| filter | `wp_get_attachment_image_src` | [$this, 'filter_attachment_image_src_to_webp'] | 20 | ml-media-master.php:131 |
-| filter | `wp_calculate_image_srcset` | [$this, 'filter_attachment_srcset_to_webp'] | 20 | ml-media-master.php:132 |
-| filter | `the_content` | [$this, 'filter_html_content_urls_to_webp'] | 20 | ml-media-master.php:134 |
-| filter | `post_thumbnail_html` | [$this, 'filter_html_content_urls_to_webp'] | 20 | ml-media-master.php:135 |
-| filter | `widget_text` | [$this, 'filter_html_content_urls_to_webp'] | 20 | ml-media-master.php:136 |
-| filter | `widget_block_content` | [$this, 'filter_html_content_urls_to_webp'] | 20 | ml-media-master.php:137 |
-| filter | `render_block` | [$this, 'filter_html_content_urls_to_webp'] | 20 | ml-media-master.php:138 |
-| action | `mlgp_after_items_stored` | [$this, 'handle_mlgp_items_stored'] | 20 | ml-media-master.php:143 |
-| action | `shutdown` | [$this, 'flush_webp_queue'] | 0 | ml-media-master.php:148 |
+| action | `admin_menu` | [$this, 'register_admin_menu'] | 10 | ml-media-master.php:125 |
+| action | `admin_init` | [$this, 'register_settings'] | 10 | ml-media-master.php:126 |
+| action | `admin_enqueue_scripts` | [$this, 'enqueue_admin_assets'] | 10 | ml-media-master.php:127 |
+| action | `template_redirect` | [$this, 'maybe_redirect_missing_upload_to_webp'] | 1 | ml-media-master.php:128 |
+| filter | `wp_handle_upload` | [$this, 'process_upload'] | 20 | ml-media-master.php:130 |
+| filter | `wp_generate_attachment_metadata` | [$this, 'fix_metadata_after_webp'] | 20 | ml-media-master.php:131 |
+| filter | `intermediate_image_sizes_advanced` | [$this, 'filter_intermediate_sizes'] | 999 | ml-media-master.php:133 |
+| filter | `big_image_size_threshold` | [$this, 'filter_big_image_threshold'] | 999 | ml-media-master.php:134 |
+| filter | `wp_get_attachment_url` | [$this, 'filter_attachment_url_to_webp'] | 20 | ml-media-master.php:136 |
+| filter | `wp_get_attachment_image_src` | [$this, 'filter_attachment_image_src_to_webp'] | 20 | ml-media-master.php:137 |
+| filter | `wp_calculate_image_srcset` | [$this, 'filter_attachment_srcset_to_webp'] | 20 | ml-media-master.php:138 |
+| filter | `the_content` | [$this, 'filter_html_content_urls_to_webp'] | 20 | ml-media-master.php:140 |
+| filter | `post_thumbnail_html` | [$this, 'filter_html_content_urls_to_webp'] | 20 | ml-media-master.php:141 |
+| filter | `widget_text` | [$this, 'filter_html_content_urls_to_webp'] | 20 | ml-media-master.php:142 |
+| filter | `widget_block_content` | [$this, 'filter_html_content_urls_to_webp'] | 20 | ml-media-master.php:143 |
+| filter | `render_block` | [$this, 'filter_html_content_urls_to_webp'] | 20 | ml-media-master.php:144 |
+| action | `mlgp_after_items_stored` | [$this, 'handle_mlgp_items_stored'] | 20 | ml-media-master.php:149 |
+| action | `shutdown` | [$this, 'flush_webp_queue'] | 0 | ml-media-master.php:154 |
 
 ### Dinâmicos (3)
 
@@ -126,7 +127,7 @@ ml-media-master.php:2080 → _once ABSPATH . 'wp-admin/includes/file.php'
 |---|---|---|
 | action | `$hook` | includes/class-ml-license-client.php:54 |
 | action | `$hook` | includes/class-mlmm-license.php:103 |
-| action | `self::WEBP_QUEUE_HOOK` | ml-media-master.php:147 |
+| action | `self::WEBP_QUEUE_HOOK` | ml-media-master.php:153 |
 
 ### Pontos de extensão expostos — do_action / apply_filters (0) 🔒 não renomear
 
@@ -178,7 +179,7 @@ _nenhum_
 | Endpoints AJAX | 0 |
 | Rotas REST | 0 |
 | Verificações de nonce | 1 |
-| $wpdb->prepare() | 4 |
+| $wpdb->prepare() | 8 |
 | SQL com variável interpolada (revisar) | 1 |
 | uninstall.php | ✅ |
 
@@ -197,7 +198,7 @@ _nenhum_
 
 ### SQL a revisar
 
-- ml-media-master.php:1417
+- ml-media-master.php:1689
 
 ### Assets enfileirados
 
@@ -244,4 +245,4 @@ _nenhum_
 - **includes/class-mlmm-gallery-pro.php** — __construct:27, is_available:34, get_dashboard_summary:47
 - **includes/class-mlmm-license.php** — client:57, is_active:71, is_locked:76, forget:82, boot:88, maybe_auto_trial:112, guard_settings_post:127, lock_settings_update:147, locked_message:150, render_locked_notice:156, summary:166, handle_activate:226, handle_sync:238, handle_remove:247, guard_request:253, redirect_with_toast:260
 - **includes/class-mlmm-updater.php** — __construct:38, init:46, filter_update_uri:74, inject_update:97, plugin_info:142, get_latest_release:187, parse_release:275, pick_asset_zip_url:312, is_trusted_asset_url:346, build_update_uri_payload:362, build_transient_payload:386, icons:408, store_cache:418, store_api_failure:423, invalidate_release_cache:435, maybe_invalidate_on_manual_check:450, is_force_refresh_request:461, flush_cache_after_update:485
-- **ml-media-master.php** — get_current_language:68, t:83, get_logo_url:97, get_admin_js_strings:105, __construct:111, get_default_settings:159, get_settings:178, register_admin_menu:186, enqueue_admin_assets:198, register_settings:230, sanitize_settings:386, render_main_section:444, render_checkbox_field:452, render_number_field:474, render_license_panel:493, consume_admin_toast:579, consume_version_toast:597, render_settings_page:615, render_environment_table:708, redirect_to_plugin_page:725, set_admin_toast:734, is_mlgp_available:747, filter_big_image_threshold:756, filter_intermediate_sizes:770, filter_attachment_url_to_webp:785, filter_attachment_image_src_to_webp:804, filter_attachment_srcset_to_webp:830, filter_html_content_urls_to_webp:859, maybe_redirect_missing_upload_to_webp:889, maybe_swap_upload_url_to_webp:956, queue_webp_conversion:1008, flush_webp_queue:1029, convert_queued_original:1065, relink_attachment_to_existing_webp:1113, find_attachment_ids_for_upload_path:1158, process_webp_queue:1215, handle_mlgp_items_stored:1276, sync_mlgp_item_record_after_upload:1372, is_gif_path:1512, process_upload:1522, fix_metadata_after_webp:1537, get_shell_resize_binary:1662, has_shell_engine:1678, has_imagick_engine:1682, has_imagick_webp_engine:1686, has_gd_webp_engine:1711, has_php_fallback_engine:1719, has_any_conversion_engine:1723, get_conversion_engine_label:1727, gd_create_image_from_file:1743, resize_with_gd:1755, resize_with_imagick:1825, convert_to_webp_via_php:1865, normalize_and_resize:1919, optimize_intermediate:1951, convert_existing_file_to_webp_targeted:2023, is_valid_generated_file:2157, guess_mime_from_extension:2161, ensure_webp_exists_from_original:2175, convert_to_webp_targeted:2206, run_cwebp:2304, cleanup_temp_webp_candidates:2325, is_exec_available:2336, binary_exists:2350, get_binary_test_commands:2382, get_conversion_quality:2412, convert_file_to_webp_copy:2416, render_mlgp_tab:2454
+- **ml-media-master.php** — get_current_language:74, t:89, get_logo_url:103, get_admin_js_strings:111, __construct:117, get_default_settings:165, get_settings:184, register_admin_menu:192, enqueue_admin_assets:204, register_settings:236, sanitize_settings:392, render_main_section:450, render_checkbox_field:458, render_number_field:480, render_license_panel:499, consume_admin_toast:585, consume_version_toast:603, render_settings_page:621, render_environment_table:714, redirect_to_plugin_page:731, set_admin_toast:740, is_mlgp_available:753, filter_big_image_threshold:762, filter_intermediate_sizes:776, filter_attachment_url_to_webp:791, filter_attachment_image_src_to_webp:810, filter_attachment_srcset_to_webp:836, filter_html_content_urls_to_webp:865, maybe_redirect_missing_upload_to_webp:895, maybe_swap_upload_url_to_webp:978, resolve_upload_file:1040, is_real_webp:1065, queue_webp_conversion:1085, flush_webp_queue:1113, acquire_webp_queue_lock:1146, release_webp_queue_lock:1176, get_webp_queue_failed:1187, save_webp_queue_failed:1197, relink_attachment_to_existing_webp:1210, find_attachment_ids_for_upload_path:1260, process_webp_queue:1324, convert_queued_original:1407, attachment_references_file:1451, finish_webp_attachment:1483, handle_mlgp_items_stored:1547, sync_mlgp_item_record_after_upload:1644, is_gif_path:1784, process_upload:1794, fix_metadata_after_webp:1809, get_shell_resize_binary:1935, has_shell_engine:1951, has_imagick_engine:1955, has_imagick_webp_engine:1959, has_gd_webp_engine:1984, has_php_fallback_engine:1992, has_any_conversion_engine:1996, get_conversion_engine_label:2000, gd_create_image_from_file:2016, resize_with_gd:2028, resize_with_imagick:2098, convert_to_webp_via_php:2138, normalize_and_resize:2192, optimize_intermediate:2224, convert_existing_file_to_webp_targeted:2296, is_valid_generated_file:2435, guess_mime_from_extension:2439, ensure_webp_exists_from_original:2453, convert_to_webp_targeted:2484, run_cwebp:2582, cleanup_temp_webp_candidates:2603, is_exec_available:2614, binary_exists:2628, get_binary_test_commands:2660, get_conversion_quality:2690, convert_file_to_webp_copy:2694, render_mlgp_tab:2738

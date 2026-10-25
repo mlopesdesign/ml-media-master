@@ -31,7 +31,8 @@ final class ML_Media_Master {
         private const WEBP_QUEUE_HOOK = 'mlmm_process_webp_queue';
         private const WEBP_QUEUE_LOCK = 'mlmm_webp_queue_lock';
         private const WEBP_QUEUE_MAX = 2000;
-        private const WEBP_QUEUE_BATCH = 15;
+        private const WEBP_QUEUE_FAILED_MAX = 5000;
+        private const WEBP_QUEUE_BATCH = 10;
         private const WEBP_QUEUE_TIME_BUDGET = 20;
         private const WEBP_QUEUE_MAX_ATTEMPTS = 3;
         private const ADMIN_TOAST_TRANSIENT = 'ml_media_master_admin_toast';
@@ -65,6 +66,11 @@ final class ML_Media_Master {
          * @var array<string, int>|null
          */
         private $webp_queue_failed_cache = null;
+
+        /**
+         * @var string|null
+         */
+        private $uploads_realpath_cache = null;
 
         private function get_current_language(): string {
                 $locale = function_exists('determine_locale') ? (string) determine_locale() : (string) get_locale();
@@ -935,11 +941,27 @@ final class ML_Media_Master {
                         return;
                 }
 
-                if (!$this->ensure_webp_exists_from_original($absolute_path, $webp_path)) {
+                // 2.10.2: caminho com "../" para fora de uploads não é tratado.
+                if (file_exists($absolute_path) && $this->resolve_upload_file($absolute_path) === '') {
                         return;
                 }
 
                 $redirect_path = preg_replace('/\.(jpe?g|png)$/i', '.webp', $path);
+                if ($this->ensure_webp_exists_from_original($absolute_path, $webp_path)) {
+                        // ok: WebP do mesmo nome.
+                } else {
+                        // 2.10.2: o JPG/PNG enviado que ficava ao lado do "-scaled"/"-rotated" agora é
+                        // apagado; o pedido ao nome original vai para o WebP desse arquivo.
+                        $redirect_path = '';
+                        foreach (['-scaled', '-rotated'] as $suffix) {
+                                $candidate = (string) preg_replace('/\.(jpe?g|png)$/i', $suffix . '.webp', $absolute_path);
+                                if ($this->is_real_webp($candidate)) {
+                                        $redirect_path = (string) preg_replace('/\.(jpe?g|png)$/i', $suffix . '.webp', $path);
+                                        break;
+                                }
+                        }
+                }
+
                 if (!is_string($redirect_path) || $redirect_path === '') {
                         return;
                 }
@@ -998,6 +1020,11 @@ final class ML_Media_Master {
                 // fatal "Call to undefined function wp_tempnam()" (HTTP 500). Agora o original vai
                 // para a fila e o WebP é gerado em segundo plano; na visita seguinte a URL troca.
                 if ($this->is_valid_generated_file($webp_path)) {
+                        // WebP já existe (gerado por versões antigas). Com a Remoção segura ligada e
+                        // o original ainda no disco, a fila religa o anexo ao WebP e apaga o JPG/PNG.
+                        if (!empty($this->settings['delete_original']) && file_exists($absolute_path)) {
+                                $this->queue_webp_conversion($absolute_path, $webp_path);
+                        }
                         return $webp_url;
                 }
 
@@ -1006,12 +1033,69 @@ final class ML_Media_Master {
                 return $url;
         }
 
+        /**
+         * Caminho real (realpath) de um arquivo DENTRO da pasta de uploads, ou '' se estiver fora
+         * (ex.: "uploads/../themes/x.png" vindo do conteúdo de um post) ou não existir.
+         */
+        private function resolve_upload_file(string $path): string {
+                if ($this->uploads_realpath_cache === null) {
+                        $uploads = wp_get_upload_dir();
+                        $base = !empty($uploads['basedir']) ? realpath((string) $uploads['basedir']) : false;
+                        $this->uploads_realpath_cache = is_string($base) ? rtrim(wp_normalize_path($base), '/') : '';
+                }
+
+                if ($this->uploads_realpath_cache === '' || $path === '') {
+                        return '';
+                }
+
+                $real = realpath($path);
+                if (!is_string($real) || !is_file($real)) {
+                        return '';
+                }
+
+                $real = wp_normalize_path($real);
+
+                return strpos($real, $this->uploads_realpath_cache . '/') === 0 ? $real : '';
+        }
+
+        /**
+         * WebP de verdade: assinatura WebP, largura/altura > 0 e, com GD, decodifica inteiro
+         * (pega arquivo truncado por processo interrompido). Exigido antes de apagar qualquer original.
+         */
+        private function is_real_webp(string $path): bool {
+                if (!$this->is_valid_generated_file($path)) {
+                        return false;
+                }
+
+                $info = @getimagesize($path);
+                if (!is_array($info) || empty($info[0]) || empty($info[1]) || (int) ($info[2] ?? 0) !== IMAGETYPE_WEBP) {
+                        return false;
+                }
+
+                if (function_exists('imagecreatefromwebp') && ((int) $info[0] * (int) $info[1]) <= 40000000) {
+                        $image = @imagecreatefromwebp($path);
+                        if (!$image) {
+                                return false;
+                        }
+                        imagedestroy($image);
+                }
+
+                return true;
+        }
+
         private function queue_webp_conversion(string $original_path, string $webp_path): void {
-                if ($original_path === '' || $webp_path === '' || isset($this->webp_queue_pending[$original_path])) {
+                unset($webp_path);
+
+                if ($original_path === '' || isset($this->webp_queue_pending[$original_path])) {
                         return;
                 }
 
-                if (!preg_match('/\.(jpe?g|png)$/i', $original_path) || !file_exists($original_path)) {
+                if (!preg_match('/\.(jpe?g|png)$/i', $original_path)) {
+                        return;
+                }
+
+                $real = $this->resolve_upload_file($original_path);
+                if ($real === '') {
                         return;
                 }
 
@@ -1020,11 +1104,11 @@ final class ML_Media_Master {
                         $this->webp_queue_failed_cache = is_array($failed) ? $failed : [];
                 }
 
-                if ((int) ($this->webp_queue_failed_cache[$original_path] ?? 0) >= self::WEBP_QUEUE_MAX_ATTEMPTS) {
+                if ((int) ($this->webp_queue_failed_cache[$real] ?? 0) >= self::WEBP_QUEUE_MAX_ATTEMPTS) {
                         return;
                 }
 
-                $this->webp_queue_pending[$original_path] = $webp_path;
+                $this->webp_queue_pending[$original_path] = $real;
         }
 
         public function flush_webp_queue(): void {
@@ -1038,11 +1122,11 @@ final class ML_Media_Master {
                 }
 
                 $before = count($queue);
-                foreach ($this->webp_queue_pending as $original => $webp) {
+                foreach ($this->webp_queue_pending as $real) {
                         if (count($queue) >= self::WEBP_QUEUE_MAX) {
                                 break;
                         }
-                        $queue[$original] = $webp;
+                        $queue[$real] = (string) preg_replace('/\.(jpe?g|png)$/i', '.webp', $real);
                 }
                 $this->webp_queue_pending = [];
 
@@ -1056,52 +1140,65 @@ final class ML_Media_Master {
         }
 
         /**
-         * Converte um original da fila. Se o arquivo pertence a um anexo da Biblioteca de Mídia,
-         * usa o mesmo caminho do upload (fix_metadata_after_webp): converte o principal e todos os
-         * tamanhos, aponta o banco para o WebP e apaga os JPG/PNG (delete_original). Fora da
-         * biblioteca, gera o WebP e apaga o original só quando o WebP foi validado e a troca de
-         * URLs está ligada (pedidos antigos ao .jpg são redirecionados ao .webp).
+         * Trava atômica (INSERT IGNORE): só um processo converte por vez. Trava com mais de
+         * 10 minutos é de processo morto e é tomada com UPDATE condicional (também atômico).
          */
-        private function convert_queued_original(string $original, string $webp): bool {
-                $attachment_ids = $this->find_attachment_ids_for_upload_path($original);
-                foreach ($attachment_ids as $attachment_id) {
-                        $mime = strtolower((string) get_post_mime_type($attachment_id));
-                        if (!in_array($mime, ['image/jpeg', 'image/jpg', 'image/png'], true)) {
-                                continue;
-                        }
-                        $metadata = wp_get_attachment_metadata($attachment_id);
-                        if (!is_array($metadata)) {
-                                continue;
-                        }
-                        $attached = get_attached_file($attachment_id, true);
-                        if (is_string($attached) && file_exists($attached)) {
-                                $new_metadata = $this->fix_metadata_after_webp($metadata, $attachment_id);
-                        } else {
-                                // Outro anexo com o mesmo arquivo já converteu e apagou o JPG/PNG.
-                                $new_metadata = $this->relink_attachment_to_existing_webp($metadata, $attachment_id);
-                        }
-                        if ($new_metadata !== $metadata) {
-                                wp_update_attachment_metadata($attachment_id, $new_metadata);
-                        }
-                }
+        private function acquire_webp_queue_lock(): bool {
+                global $wpdb;
 
-                if (!empty($attachment_ids) && $this->is_valid_generated_file($webp)) {
+                $now = (string) time();
+                $inserted = $wpdb->query($wpdb->prepare(
+                        "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')",
+                        self::WEBP_QUEUE_LOCK,
+                        $now
+                ));
+                if ((int) $inserted === 1) {
                         return true;
                 }
 
-                if (!$this->ensure_webp_exists_from_original($original, $webp)) {
+                $since = (string) $wpdb->get_var($wpdb->prepare(
+                        "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s",
+                        self::WEBP_QUEUE_LOCK
+                ));
+                if ($since !== '' && (time() - (int) $since) < 10 * MINUTE_IN_SECONDS) {
                         return false;
                 }
 
-                if (!empty($this->settings['delete_original'])
-                        && !empty($this->settings['serve_existing_webp_uploads'])
-                        && $original !== $webp
-                        && file_exists($original)
-                        && $this->is_valid_generated_file($webp)) {
-                        @unlink($original);
-                }
+                $taken = $wpdb->query($wpdb->prepare(
+                        "UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s AND option_value = %s",
+                        $now,
+                        self::WEBP_QUEUE_LOCK,
+                        $since
+                ));
 
-                return true;
+                return (int) $taken === 1;
+        }
+
+        private function release_webp_queue_lock(): void {
+                global $wpdb;
+
+                $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->options} WHERE option_name = %s", self::WEBP_QUEUE_LOCK));
+                wp_cache_delete(self::WEBP_QUEUE_LOCK, 'options');
+        }
+
+        /**
+         * @return array<string, int>
+         */
+        private function get_webp_queue_failed(): array {
+                wp_cache_delete(self::WEBP_QUEUE_FAILED_OPTION, 'options');
+                $failed = get_option(self::WEBP_QUEUE_FAILED_OPTION, []);
+
+                return is_array($failed) ? $failed : [];
+        }
+
+        /**
+         * @param array<string, int> $failed
+         */
+        private function save_webp_queue_failed(array $failed): void {
+                if (count($failed) > self::WEBP_QUEUE_FAILED_MAX) {
+                        $failed = array_slice($failed, -self::WEBP_QUEUE_FAILED_MAX, null, true);
+                }
+                update_option(self::WEBP_QUEUE_FAILED_OPTION, $failed, false);
         }
 
         /**
@@ -1117,7 +1214,7 @@ final class ML_Media_Master {
                 }
 
                 $webp_file = (string) preg_replace('/\.(jpe?g|png)$/i', '.webp', $attached);
-                if ($webp_file === $attached || !$this->is_valid_generated_file($webp_file)) {
+                if ($webp_file === $attached || !$this->is_real_webp($webp_file)) {
                         return $metadata;
                 }
 
@@ -1132,13 +1229,18 @@ final class ML_Media_Master {
 
                 $metadata['file'] = _wp_relative_upload_path($webp_file);
                 $metadata['filesize'] = (int) @filesize($webp_file);
+                $size = @getimagesize($webp_file);
+                if ($size) {
+                        $metadata['width']  = (int) $size[0];
+                        $metadata['height'] = (int) $size[1];
+                }
                 $dir = dirname($webp_file);
                 foreach ((array) ($metadata['sizes'] ?? []) as $size_key => $size_data) {
                         if (!is_array($size_data) || empty($size_data['file']) || !is_string($size_data['file'])) {
                                 continue;
                         }
                         $sub_webp_name = (string) preg_replace('/\.(jpe?g|png)$/i', '.webp', $size_data['file']);
-                        if ($sub_webp_name !== $size_data['file'] && $this->is_valid_generated_file(trailingslashit($dir) . $sub_webp_name)) {
+                        if ($sub_webp_name !== $size_data['file'] && $this->is_real_webp(trailingslashit($dir) . $sub_webp_name)) {
                                 $metadata['sizes'][$size_key]['file'] = $sub_webp_name;
                                 $metadata['sizes'][$size_key]['mime-type'] = 'image/webp';
                         }
@@ -1159,7 +1261,8 @@ final class ML_Media_Master {
                 global $wpdb;
 
                 $uploads = wp_get_upload_dir();
-                $basedir = isset($uploads['basedir']) ? rtrim(wp_normalize_path((string) $uploads['basedir']), '/') . '/' : '';
+                $basedir_real = !empty($uploads['basedir']) ? realpath((string) $uploads['basedir']) : false;
+                $basedir = is_string($basedir_real) ? rtrim(wp_normalize_path($basedir_real), '/') . '/' : '';
                 $path = wp_normalize_path($path);
                 if ($basedir === '/' || strpos($path, $basedir) !== 0) {
                         return [];
@@ -1175,6 +1278,10 @@ final class ML_Media_Master {
                 $candidates[] = $base;
                 $candidates[] = (string) preg_replace('/(\.(?:jpe?g|png))$/i', '-scaled$1', $base);
                 $candidates[] = (string) preg_replace('/-scaled(\.(?:jpe?g|png))$/i', '$1', $relative);
+                // Anexos já religados ao WebP também contam (tamanho JPG/PNG que sobrou).
+                foreach ($candidates as $candidate) {
+                        $candidates[] = (string) preg_replace('/\.(?:jpe?g|png)$/i', '.webp', $candidate);
+                }
                 $candidates = array_values(array_unique(array_filter($candidates)));
 
                 $placeholders = implode(',', array_fill(0, count($candidates), '%s'));
@@ -1185,11 +1292,13 @@ final class ML_Media_Master {
                 ));
 
                 $filename = wp_basename($path);
+                $filename_webp = (string) preg_replace('/\.(?:jpe?g|png)$/i', '.webp', $filename);
+                $path_webp = (string) preg_replace('/\.(?:jpe?g|png)$/i', '.webp', $path);
                 $found = [];
                 foreach ((array) $ids as $id) {
                         $id = (int) $id;
                         $attached = get_attached_file($id, true);
-                        if (is_string($attached) && wp_normalize_path($attached) === $path) {
+                        if (is_string($attached) && in_array(wp_normalize_path($attached), [$path, $path_webp], true)) {
                                 $found[] = $id;
                                 continue;
                         }
@@ -1203,7 +1312,7 @@ final class ML_Media_Master {
                                 continue;
                         }
                         foreach ((array) ($metadata['sizes'] ?? []) as $size) {
-                                if (is_array($size) && isset($size['file']) && $size['file'] === $filename) {
+                                if (is_array($size) && isset($size['file']) && in_array($size['file'], [$filename, $filename_webp], true)) {
                                         $found[] = $id;
                                         break;
                                 }
@@ -1214,65 +1323,228 @@ final class ML_Media_Master {
         }
 
         public function process_webp_queue(): void {
-                if (get_transient(self::WEBP_QUEUE_LOCK)) {
+                if (!$this->acquire_webp_queue_lock()) {
                         return;
                 }
-                set_transient(self::WEBP_QUEUE_LOCK, 1, 5 * MINUTE_IN_SECONDS);
 
                 $this->settings = $this->get_settings();
 
-                $queue = get_option(self::WEBP_QUEUE_OPTION, []);
-                if (!is_array($queue) || empty($queue)) {
-                        delete_option(self::WEBP_QUEUE_OPTION);
-                        delete_transient(self::WEBP_QUEUE_LOCK);
-                        return;
-                }
-
-                $failed = get_option(self::WEBP_QUEUE_FAILED_OPTION, []);
-                if (!is_array($failed)) {
-                        $failed = [];
+                $budget = self::WEBP_QUEUE_TIME_BUDGET;
+                $max_exec = (int) ini_get('max_execution_time');
+                if ($max_exec > 0) {
+                        $budget = max(5, min($budget, (int) floor($max_exec / 2)));
                 }
 
                 $started = time();
-                $done = 0;
-                foreach ($queue as $original => $webp) {
-                        if ($done >= self::WEBP_QUEUE_BATCH || (time() - $started) >= self::WEBP_QUEUE_TIME_BUDGET) {
+                $processed = 0;
+                while ($processed < self::WEBP_QUEUE_BATCH && (time() - $started) < $budget) {
+                        wp_cache_delete(self::WEBP_QUEUE_OPTION, 'options');
+                        $queue = get_option(self::WEBP_QUEUE_OPTION, []);
+                        if (!is_array($queue) || empty($queue)) {
                                 break;
                         }
-                        unset($queue[$original]);
-                        $done++;
 
-                        $original = (string) $original;
-                        $webp = (string) $webp;
-                        if (!file_exists($original)) {
-                                unset($failed[$original]);
+                        reset($queue);
+                        $original = (string) key($queue);
+                        unset($queue[$original]);
+                        // Progresso gravado item a item: se o processo morrer, o item já saiu da fila.
+                        update_option(self::WEBP_QUEUE_OPTION, $queue, false);
+
+                        $real = $this->resolve_upload_file($original);
+                        if ($real === '' || !preg_match('/\.(jpe?g|png)$/i', $real)) {
+                                continue; // sumiu ou está fora de uploads: não conta no lote.
+                        }
+                        $webp = (string) preg_replace('/\.(jpe?g|png)$/i', '.webp', $real);
+
+                        $failed = $this->get_webp_queue_failed();
+                        $attempts = (int) ($failed[$real] ?? 0);
+                        if ($attempts >= self::WEBP_QUEUE_MAX_ATTEMPTS) {
                                 continue;
                         }
 
-                        if ($this->convert_queued_original($original, $webp)) {
-                                unset($failed[$original]);
-                        } elseif (file_exists($original)) {
-                                $failed[$original] = (int) ($failed[$original] ?? 0) + 1;
+                        // A tentativa conta ANTES de converter: um erro fatal (memória/tempo) também
+                        // conta, e depois de 3 o arquivo não volta para a fila.
+                        $failed[$real] = $attempts + 1;
+                        $this->save_webp_queue_failed($failed);
+                        $processed++;
+
+                        $ok = $this->convert_queued_original($real, $webp);
+
+                        $failed = $this->get_webp_queue_failed();
+                        if ($ok) {
+                                if (file_exists($real)) {
+                                        // Convertido, mas o original fica (fora da biblioteca ou
+                                        // Remoção segura desligada): não volta para a fila.
+                                        $failed[$real] = self::WEBP_QUEUE_MAX_ATTEMPTS;
+                                } else {
+                                        unset($failed[$real]);
+                                }
+                                $this->save_webp_queue_failed($failed);
                         }
                 }
 
-                // Mantém o registro de falhas limitado (descarta as mais antigas).
-                if (count($failed) > self::WEBP_QUEUE_MAX) {
-                        $failed = array_slice($failed, -self::WEBP_QUEUE_MAX, null, true);
-                }
-
-                update_option(self::WEBP_QUEUE_FAILED_OPTION, $failed, false);
-                if (empty($queue)) {
+                wp_cache_delete(self::WEBP_QUEUE_OPTION, 'options');
+                $queue = get_option(self::WEBP_QUEUE_OPTION, []);
+                if (!is_array($queue) || empty($queue)) {
                         delete_option(self::WEBP_QUEUE_OPTION);
-                } else {
-                        update_option(self::WEBP_QUEUE_OPTION, $queue, false);
-                        if (!wp_next_scheduled(self::WEBP_QUEUE_HOOK)) {
-                                wp_schedule_single_event(time() + 60, self::WEBP_QUEUE_HOOK);
+                } elseif (!wp_next_scheduled(self::WEBP_QUEUE_HOOK)) {
+                        wp_schedule_single_event(time() + 60, self::WEBP_QUEUE_HOOK);
+                }
+
+                $this->release_webp_queue_lock();
+        }
+
+        /**
+         * Converte um original da fila.
+         *
+         * Anexo da Biblioteca de Mídia: mesmo caminho do upload (fix_metadata_after_webp) —
+         * principal e tamanhos em WebP, banco no WebP, JPG/PNG apagados (Remoção segura). Só conta
+         * como sucesso se nenhum anexo continuar apontando para o arquivo da fila.
+         *
+         * Fora da biblioteca (ML Gallery Pro antigo, tema, formulários, backups do editor de imagem):
+         * só gera o WebP. Não apaga, porque quem aponta para esse arquivo não é religado aqui.
+         */
+        private function convert_queued_original(string $original, string $webp): bool {
+                $attachment_ids = $this->find_attachment_ids_for_upload_path($original);
+
+                if (empty($attachment_ids)) {
+                        return $this->ensure_webp_exists_from_original($original, $webp) && $this->is_real_webp($webp);
+                }
+
+                foreach ($attachment_ids as $attachment_id) {
+                        $metadata = wp_get_attachment_metadata($attachment_id);
+                        if (!is_array($metadata)) {
+                                continue;
+                        }
+
+                        $mime = strtolower((string) get_post_mime_type($attachment_id));
+                        $attached = get_attached_file($attachment_id, true);
+
+                        if (in_array($mime, ['image/jpeg', 'image/jpg', 'image/png'], true)) {
+                                if (is_string($attached) && file_exists($attached)) {
+                                        $new_metadata = $this->fix_metadata_after_webp($metadata, $attachment_id);
+                                } else {
+                                        // Outro anexo com o mesmo arquivo já converteu e apagou o JPG/PNG.
+                                        $new_metadata = $this->relink_attachment_to_existing_webp($metadata, $attachment_id);
+                                }
+                        } elseif ($mime === 'image/webp') {
+                                // Anexo já em WebP com tamanho/original JPG/PNG que sobrou.
+                                $new_metadata = $this->finish_webp_attachment($metadata, $attachment_id);
+                        } else {
+                                continue;
+                        }
+
+                        if ($new_metadata !== $metadata) {
+                                wp_update_attachment_metadata($attachment_id, $new_metadata);
                         }
                 }
 
-                delete_transient(self::WEBP_QUEUE_LOCK);
+                $filename = wp_basename($original);
+                foreach ($attachment_ids as $attachment_id) {
+                        if ($this->attachment_references_file($attachment_id, $filename)) {
+                                return false;
+                        }
+                }
+
+                return true;
         }
+
+        private function attachment_references_file(int $attachment_id, string $filename): bool {
+                $attached = get_attached_file($attachment_id, true);
+                if (is_string($attached) && wp_basename($attached) === $filename) {
+                        return true;
+                }
+
+                $metadata = wp_get_attachment_metadata($attachment_id);
+                if (!is_array($metadata)) {
+                        return false;
+                }
+
+                if (!empty($metadata['original_image']) && $metadata['original_image'] === $filename) {
+                        return true;
+                }
+
+                foreach ((array) ($metadata['sizes'] ?? []) as $size) {
+                        if (is_array($size) && isset($size['file']) && $size['file'] === $filename) {
+                                return true;
+                        }
+                }
+
+                return false;
+        }
+
+        /**
+         * Anexo já em WebP: converte os tamanhos que ainda são JPG/PNG, religa no metadata e
+         * apaga os JPG/PNG (Remoção segura), incluindo o original_image ao lado do "-scaled".
+         *
+         * @param array<string, mixed> $metadata
+         * @return array<string, mixed>
+         */
+        private function finish_webp_attachment(array $metadata, int $attachment_id): array {
+                if (empty($this->settings['enabled'])) {
+                        return $metadata;
+                }
+
+                $main = get_attached_file($attachment_id, true);
+                if (!is_string($main) || !$this->is_real_webp($main)) {
+                        return $metadata;
+                }
+
+                $dir = dirname($main);
+                $to_delete = [];
+
+                foreach ((array) ($metadata['sizes'] ?? []) as $size_key => $size_data) {
+                        if (!is_array($size_data) || empty($size_data['file']) || !is_string($size_data['file'])) {
+                                continue;
+                        }
+                        if (!preg_match('/\.(jpe?g|png)$/i', $size_data['file'])) {
+                                continue;
+                        }
+
+                        $sub_original = trailingslashit($dir) . $size_data['file'];
+                        $sub_webp_name = (string) preg_replace('/\.(jpe?g|png)$/i', '.webp', $size_data['file']);
+                        $sub_webp = trailingslashit($dir) . $sub_webp_name;
+
+                        if (file_exists($sub_original)) {
+                                $sub_result = $this->convert_file_to_webp_copy($sub_original, $sub_webp);
+                                if (empty($sub_result['success'])) {
+                                        continue;
+                                }
+                        }
+
+                        if (!$this->is_real_webp($sub_webp)) {
+                                continue;
+                        }
+
+                        $metadata['sizes'][$size_key]['file'] = $sub_webp_name;
+                        $metadata['sizes'][$size_key]['mime-type'] = 'image/webp';
+                        $metadata['sizes'][$size_key]['filesize'] = (int) @filesize($sub_webp);
+                        if (file_exists($sub_original)) {
+                                $to_delete[] = $sub_original;
+                        }
+                }
+
+                if (!empty($this->settings['delete_original']) && !empty($metadata['original_image']) && is_string($metadata['original_image'])) {
+                        $kept = trailingslashit($dir) . wp_basename($metadata['original_image']);
+                        if (preg_match('/\.(jpe?g|png)$/i', $kept)) {
+                                if (file_exists($kept)) {
+                                        $to_delete[] = $kept;
+                                }
+                                unset($metadata['original_image']);
+                        }
+                }
+
+                if (!empty($this->settings['delete_original'])) {
+                        foreach (array_unique($to_delete) as $old_file) {
+                                if ($old_file !== $main && file_exists($old_file)) {
+                                        @unlink($old_file);
+                                }
+                        }
+                }
+
+                return $metadata;
+        }
+
         public function handle_mlgp_items_stored(array $items, int $gallery_id): void {
                 $this->settings = $this->get_settings();
 
@@ -1504,7 +1776,7 @@ final class ML_Media_Master {
                         if (!in_array($old_ext, ['jpg', 'jpeg', 'png'], true)) {
                                 continue;
                         }
-                        if ($this->is_valid_generated_file($new_path) && file_exists($old_path) && is_writable($old_path)) {
+                        if ($this->is_real_webp($new_path) && file_exists($old_path) && is_writable($old_path)) {
                                 @unlink($old_path);
                         }
                 }
@@ -1578,7 +1850,8 @@ final class ML_Media_Master {
                 }
 
                 $converted_main = $this->convert_existing_file_to_webp_targeted($original_file, $webp_file, false);
-                if (empty($converted_main['success']) || !$this->is_valid_generated_file($webp_file)) {
+                // 2.10.2: só religa (e depois apaga o original) com WebP decodificável de verdade.
+                if (empty($converted_main['success']) || !$this->is_real_webp($webp_file)) {
                         return $metadata;
                 }
 
@@ -1626,7 +1899,7 @@ final class ML_Media_Master {
                                 }
 
                                 $sub_result = $this->convert_file_to_webp_copy($sub_original, $sub_webp);
-                                if (empty($sub_result['success']) || !$this->is_valid_generated_file($sub_webp)) {
+                                if (empty($sub_result['success']) || !$this->is_real_webp($sub_webp)) {
                                         continue;
                                 }
 
@@ -2049,13 +2322,18 @@ final class ML_Media_Master {
                         return $result;
                 }
 
+                // 2.10.2: WebP existente truncado (processo interrompido) é refeito, não aceito.
+                if ($this->is_valid_generated_file($final_output) && !$this->is_real_webp($final_output)) {
+                        @unlink($final_output);
+                }
+
                 if ($this->is_valid_generated_file($final_output)) {
                         $result['success'] = true;
                         $result['status'] = 'already_webp_exists';
                         $result['already_existed'] = true;
                         $result['webp_size'] = (int) @filesize($final_output);
 
-                        if ($allow_delete_original && !empty($this->settings['delete_original']) && $input !== $final_output && file_exists($input)) {
+                        if ($allow_delete_original && !empty($this->settings['delete_original']) && $input !== $final_output && file_exists($input) && $this->is_real_webp($final_output)) {
                                 if (@unlink($input)) {
                                         $result['deleted_original'] = true;
                                         $result['status'] = 'already_webp_exists_original_deleted';
@@ -2142,7 +2420,7 @@ final class ML_Media_Master {
                 $result['status'] = 'converted';
                 $result['webp_size'] = (int) @filesize($final_output);
 
-                if ($allow_delete_original && !empty($this->settings['delete_original']) && $input !== $final_output && $this->is_valid_generated_file($final_output)) {
+                if ($allow_delete_original && !empty($this->settings['delete_original']) && $input !== $final_output && $this->is_real_webp($final_output)) {
                         if (@unlink($input)) {
                                 $result['deleted_original'] = true;
                                 $result['status'] = 'converted_original_deleted';
@@ -2427,7 +2705,7 @@ final class ML_Media_Master {
                         return ['success' => false, 'status' => 'missing_source'];
                 }
 
-                if ($this->is_valid_generated_file($output)) {
+                if ($this->is_real_webp($output)) {
                         return ['success' => true, 'already_existed' => true, 'output' => $output];
                 }
 
@@ -2440,12 +2718,18 @@ final class ML_Media_Master {
                         $editor->set_quality($quality);
                 }
 
-                $saved = $editor->save($output, 'image/webp');
+                // 2.10.2: grava em temporário e renomeia; um processo interrompido não deixa um
+                // WebP truncado com o nome final.
+                $temp_output = $output . '.mlmm-tmp.webp';
+                $saved = $editor->save($temp_output, 'image/webp');
                 if (is_wp_error($saved)) {
+                        @unlink($temp_output);
                         return ['success' => false, 'status' => $saved->get_error_code() ?: 'save_error'];
                 }
 
-                if (!$this->is_valid_generated_file($output)) {
+                $saved_path = is_array($saved) && !empty($saved['path']) ? (string) $saved['path'] : $temp_output;
+                if (!$this->is_real_webp($saved_path) || !@rename($saved_path, $output)) {
+                        @unlink($saved_path);
                         return ['success' => false, 'status' => 'invalid_output'];
                 }
 
@@ -2474,3 +2758,8 @@ final class ML_Media_Master {
 }
 
 new ML_Media_Master();
+
+// 2.10.2: ao desativar, desagenda a fila de conversão WebP em segundo plano.
+register_deactivation_hook(__FILE__, static function (): void {
+        wp_clear_scheduled_hook('mlmm_process_webp_queue');
+});

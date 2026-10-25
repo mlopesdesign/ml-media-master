@@ -13,12 +13,13 @@ with this file.
 ## [2.10.2] - 2026-10-25
 
 ### Corrigido
-- Crítico: `maybe_swap_upload_url_to_webp()` (filtros `wp_get_attachment_url`, `wp_get_attachment_image_src`, `wp_calculate_image_srcset`, `the_content`, `render_block` etc.) convertia a imagem para WebP de forma síncrona durante a renderização. Página com muitas imagens = muitas conversões por visita, repetidas a cada visita quando falhavam; fora do wp-admin, erro fatal `Call to undefined function wp_tempnam()` (HTTP 500 no front-end, visto em produção).
-- Agora a troca de URL só acontece se o WebP já existe; o original sem WebP entra na fila `mlmm_webp_queue`, processada pelo evento `mlmm_process_webp_queue` (WP-Cron, 15 por lote, 20 s de orçamento, trava `mlmm_webp_queue_lock`, máx. 3 tentativas por arquivo em `mlmm_webp_queue_failed`, fila limitada a 2000).
-- Fila com anexo: o original da fila que pertence a um anexo passa por `fix_metadata_after_webp()` (o mesmo do upload): principal + tamanhos em WebP, `_wp_attached_file`/mime/metadata no WebP e JPG/PNG apagados (`delete_original`). Anexos duplicados que apontam para o mesmo arquivo são religados ao WebP (`relink_attachment_to_existing_webp()`). Arquivo fora da biblioteca: JPG/PNG apagado após validar o WebP quando `delete_original` e `serve_existing_webp_uploads` estão ligados (o 404 do .jpg redireciona ao .webp).
-- Upload com redimensionamento do WP ligado: o JPG/PNG de `metadata['original_image']` (ao lado do `-scaled`) ficava no disco; agora é apagado junto e a chave sai do metadata.
-- `convert_existing_file_to_webp_targeted()` carrega `wp-admin/includes/file.php` quando `wp_tempnam()` não existe (front-end, cron, REST, ML Gallery Pro).
-- `uninstall.php` remove a fila, o registro de falhas, a trava e desagenda o evento.
+- Crítico: `maybe_swap_upload_url_to_webp()` (filtros `wp_get_attachment_url`, `wp_get_attachment_image_src`, `wp_calculate_image_srcset`, `the_content`, `render_block` etc.) convertia para WebP de forma síncrona durante a renderização; fora do wp-admin dava erro fatal `Call to undefined function wp_tempnam()` (HTTP 500 no front-end, visto em produção) e repetia conversões falhas a cada visita.
+- Front só troca a URL se o WebP existe. Original sem WebP (ou com WebP irmão + JPG ainda no disco e `delete_original` ligado) vai para a fila `mlmm_webp_queue`, processada por `mlmm_process_webp_queue` (WP-Cron): 10 por lote, orçamento de tempo limitado por `max_execution_time`, trava atômica (`INSERT IGNORE` em `mlmm_webp_queue_lock`; trava de processo morto > 10 min é tomada), progresso e tentativa gravados por item antes de converter (fatal conta tentativa; máx. 3 em `mlmm_webp_queue_failed`).
+- Fila → anexo: mesmo caminho do upload (`fix_metadata_after_webp`); anexos já em WebP com tamanho/original JPG que sobrou → `finish_webp_attachment()`; anexos duplicados → `relink_attachment_to_existing_webp()`. Sucesso só quando nenhum anexo aponta mais para o arquivo. Fora da biblioteca: só gera o WebP, nunca apaga.
+- Travessia de diretório: caminhos resolvidos com `realpath()` e aceitos só dentro de uploads (fila, cron e redirect 404).
+- Validação real antes de apagar qualquer original (`is_real_webp()`: assinatura WebP, dimensões e decodificação GD). WebP truncado existente é refeito. Tamanhos gravados em temporário + `rename`.
+- Upload com redimensionamento do WP: o JPG/PNG de `metadata['original_image']` é apagado junto e sai do metadata; o 404 do nome original redireciona para `-scaled.webp`/`-rotated.webp`.
+- `wp_tempnam()` carregado fora do painel; desativação desagenda a fila; `uninstall.php` remove fila, falhas e trava.
 
 ## [2.10.1] - 2026-10-21
 
