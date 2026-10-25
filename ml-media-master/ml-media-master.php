@@ -3,7 +3,7 @@
  * Plugin Name: ML Media Master
  * Plugin URI: https://mlopesdesign.com.br
  * Description: ML Media Master para WordPress: converte JPG, JPEG e PNG para WebP automaticamente no upload (WordPress e ML Gallery Pro). GIF nunca convertido. Licença pelo site tools.mlopesdesign.com.br (teste grátis de 30 dias).
- * Version: 2.10.1
+ * Version: 2.10.2
  * Update URI: https://github.com/mlopesdesign/ml-media-master-releases
  * Requires at least: 6.0
  * Requires PHP: 8.1
@@ -23,7 +23,17 @@ require_once __DIR__ . '/includes/class-mlmm-license.php';
 
 final class ML_Media_Master {
         private const OPTION_KEY = 'ml_media_master_settings';
-        private const VERSION = '2.10.1';
+        private const VERSION = '2.10.2';
+        // 2.10.2: fila de conversão WebP em segundo plano (antes a conversão rodava
+        // dentro da renderização da página e derrubava o front-end com 500).
+        private const WEBP_QUEUE_OPTION = 'mlmm_webp_queue';
+        private const WEBP_QUEUE_FAILED_OPTION = 'mlmm_webp_queue_failed';
+        private const WEBP_QUEUE_HOOK = 'mlmm_process_webp_queue';
+        private const WEBP_QUEUE_LOCK = 'mlmm_webp_queue_lock';
+        private const WEBP_QUEUE_MAX = 2000;
+        private const WEBP_QUEUE_BATCH = 15;
+        private const WEBP_QUEUE_TIME_BUDGET = 20;
+        private const WEBP_QUEUE_MAX_ATTEMPTS = 3;
         private const ADMIN_TOAST_TRANSIENT = 'ml_media_master_admin_toast';
         private const VERSION_SEEN_OPTION = 'ml_media_master_version_seen';
 
@@ -43,6 +53,18 @@ final class ML_Media_Master {
          */
         private $uploads_base_cache = null;
         private $gallery_pro_compat = null;
+
+        /**
+         * Originais encontrados sem WebP durante esta requisição (gravados uma vez no shutdown).
+         *
+         * @var array<string, string>
+         */
+        private $webp_queue_pending = [];
+
+        /**
+         * @var array<string, int>|null
+         */
+        private $webp_queue_failed_cache = null;
 
         private function get_current_language(): string {
                 $locale = function_exists('determine_locale') ? (string) determine_locale() : (string) get_locale();
@@ -119,6 +141,11 @@ final class ML_Media_Master {
                 // after MLGP persists new items to disk and to the database.
                 // Priority 20 runs after MLGP has finished all its own post-store work.
                 add_action('mlgp_after_items_stored', [$this, 'handle_mlgp_items_stored'], 20, 2);
+
+                // 2.10.2: WebP faltando no front-end vira fila processada pelo WP-Cron,
+                // em lotes pequenos, fora da renderização da página.
+                add_action(self::WEBP_QUEUE_HOOK, [$this, 'process_webp_queue']);
+                add_action('shutdown', [$this, 'flush_webp_queue'], 0);
 
                 // GitHub Releases auto-updater (native WordPress update flow).
                 if (class_exists('MLMM_Updater')) {
@@ -964,11 +991,287 @@ final class ML_Media_Master {
                         return $url;
                 }
 
-                if ($this->ensure_webp_exists_from_original($absolute_path, $webp_path)) {
+                // 2.10.2: aqui só troca a URL se o WebP já existe. Antes este filtro convertia a
+                // imagem na hora, dentro da renderização (wp_get_attachment_image_src, the_content,
+                // srcset...): uma página com dezenas de imagens disparava dezenas de conversões por
+                // visita, repetia as que falhavam em toda visita e, fora do wp-admin, caía em erro
+                // fatal "Call to undefined function wp_tempnam()" (HTTP 500). Agora o original vai
+                // para a fila e o WebP é gerado em segundo plano; na visita seguinte a URL troca.
+                if ($this->is_valid_generated_file($webp_path)) {
                         return $webp_url;
                 }
 
+                $this->queue_webp_conversion($absolute_path, $webp_path);
+
                 return $url;
+        }
+
+        private function queue_webp_conversion(string $original_path, string $webp_path): void {
+                if ($original_path === '' || $webp_path === '' || isset($this->webp_queue_pending[$original_path])) {
+                        return;
+                }
+
+                if (!preg_match('/\.(jpe?g|png)$/i', $original_path) || !file_exists($original_path)) {
+                        return;
+                }
+
+                if ($this->webp_queue_failed_cache === null) {
+                        $failed = get_option(self::WEBP_QUEUE_FAILED_OPTION, []);
+                        $this->webp_queue_failed_cache = is_array($failed) ? $failed : [];
+                }
+
+                if ((int) ($this->webp_queue_failed_cache[$original_path] ?? 0) >= self::WEBP_QUEUE_MAX_ATTEMPTS) {
+                        return;
+                }
+
+                $this->webp_queue_pending[$original_path] = $webp_path;
+        }
+
+        public function flush_webp_queue(): void {
+                if (empty($this->webp_queue_pending)) {
+                        return;
+                }
+
+                $queue = get_option(self::WEBP_QUEUE_OPTION, []);
+                if (!is_array($queue)) {
+                        $queue = [];
+                }
+
+                $before = count($queue);
+                foreach ($this->webp_queue_pending as $original => $webp) {
+                        if (count($queue) >= self::WEBP_QUEUE_MAX) {
+                                break;
+                        }
+                        $queue[$original] = $webp;
+                }
+                $this->webp_queue_pending = [];
+
+                if (count($queue) !== $before) {
+                        update_option(self::WEBP_QUEUE_OPTION, $queue, false);
+                }
+
+                if (!empty($queue) && !wp_next_scheduled(self::WEBP_QUEUE_HOOK)) {
+                        wp_schedule_single_event(time() + 30, self::WEBP_QUEUE_HOOK);
+                }
+        }
+
+        /**
+         * Converte um original da fila. Se o arquivo pertence a um anexo da Biblioteca de Mídia,
+         * usa o mesmo caminho do upload (fix_metadata_after_webp): converte o principal e todos os
+         * tamanhos, aponta o banco para o WebP e apaga os JPG/PNG (delete_original). Fora da
+         * biblioteca, gera o WebP e apaga o original só quando o WebP foi validado e a troca de
+         * URLs está ligada (pedidos antigos ao .jpg são redirecionados ao .webp).
+         */
+        private function convert_queued_original(string $original, string $webp): bool {
+                $attachment_ids = $this->find_attachment_ids_for_upload_path($original);
+                foreach ($attachment_ids as $attachment_id) {
+                        $mime = strtolower((string) get_post_mime_type($attachment_id));
+                        if (!in_array($mime, ['image/jpeg', 'image/jpg', 'image/png'], true)) {
+                                continue;
+                        }
+                        $metadata = wp_get_attachment_metadata($attachment_id);
+                        if (!is_array($metadata)) {
+                                continue;
+                        }
+                        $attached = get_attached_file($attachment_id, true);
+                        if (is_string($attached) && file_exists($attached)) {
+                                $new_metadata = $this->fix_metadata_after_webp($metadata, $attachment_id);
+                        } else {
+                                // Outro anexo com o mesmo arquivo já converteu e apagou o JPG/PNG.
+                                $new_metadata = $this->relink_attachment_to_existing_webp($metadata, $attachment_id);
+                        }
+                        if ($new_metadata !== $metadata) {
+                                wp_update_attachment_metadata($attachment_id, $new_metadata);
+                        }
+                }
+
+                if (!empty($attachment_ids) && $this->is_valid_generated_file($webp)) {
+                        return true;
+                }
+
+                if (!$this->ensure_webp_exists_from_original($original, $webp)) {
+                        return false;
+                }
+
+                if (!empty($this->settings['delete_original'])
+                        && !empty($this->settings['serve_existing_webp_uploads'])
+                        && $original !== $webp
+                        && file_exists($original)
+                        && $this->is_valid_generated_file($webp)) {
+                        @unlink($original);
+                }
+
+                return true;
+        }
+
+        /**
+         * Anexo cujo JPG/PNG já foi apagado mas o WebP existe: aponta banco e metadata para o WebP.
+         *
+         * @param array<string, mixed> $metadata
+         * @return array<string, mixed>
+         */
+        private function relink_attachment_to_existing_webp(array $metadata, int $attachment_id): array {
+                $attached = get_attached_file($attachment_id, true);
+                if (!is_string($attached) || $attached === '' || file_exists($attached)) {
+                        return $metadata;
+                }
+
+                $webp_file = (string) preg_replace('/\.(jpe?g|png)$/i', '.webp', $attached);
+                if ($webp_file === $attached || !$this->is_valid_generated_file($webp_file)) {
+                        return $metadata;
+                }
+
+                $upload_dir = wp_get_upload_dir();
+                $base_url = isset($upload_dir['baseurl']) ? (string) $upload_dir['baseurl'] : '';
+                update_attached_file($attachment_id, $webp_file);
+                wp_update_post([
+                        'ID' => $attachment_id,
+                        'post_mime_type' => 'image/webp',
+                        'guid' => $base_url !== '' ? trailingslashit($base_url) . ltrim(_wp_relative_upload_path($webp_file), '/') : get_the_guid($attachment_id),
+                ]);
+
+                $metadata['file'] = _wp_relative_upload_path($webp_file);
+                $metadata['filesize'] = (int) @filesize($webp_file);
+                $dir = dirname($webp_file);
+                foreach ((array) ($metadata['sizes'] ?? []) as $size_key => $size_data) {
+                        if (!is_array($size_data) || empty($size_data['file']) || !is_string($size_data['file'])) {
+                                continue;
+                        }
+                        $sub_webp_name = (string) preg_replace('/\.(jpe?g|png)$/i', '.webp', $size_data['file']);
+                        if ($sub_webp_name !== $size_data['file'] && $this->is_valid_generated_file(trailingslashit($dir) . $sub_webp_name)) {
+                                $metadata['sizes'][$size_key]['file'] = $sub_webp_name;
+                                $metadata['sizes'][$size_key]['mime-type'] = 'image/webp';
+                        }
+                }
+                if (!empty($metadata['original_image']) && is_string($metadata['original_image']) && !file_exists(trailingslashit($dir) . $metadata['original_image'])) {
+                        unset($metadata['original_image']);
+                }
+
+                return $metadata;
+        }
+
+        /**
+         * Acha os anexos donos de um arquivo de uploads (principal, "-scaled" ou tamanho "-LxA").
+         *
+         * @return array<int, int>
+         */
+        private function find_attachment_ids_for_upload_path(string $path): array {
+                global $wpdb;
+
+                $uploads = wp_get_upload_dir();
+                $basedir = isset($uploads['basedir']) ? rtrim(wp_normalize_path((string) $uploads['basedir']), '/') . '/' : '';
+                $path = wp_normalize_path($path);
+                if ($basedir === '/' || strpos($path, $basedir) !== 0) {
+                        return [];
+                }
+
+                $relative = substr($path, strlen($basedir));
+                if (!is_string($relative) || $relative === '') {
+                        return [];
+                }
+
+                $candidates = [$relative];
+                $base = (string) preg_replace('/-\d+x\d+(\.(?:jpe?g|png))$/i', '$1', $relative);
+                $candidates[] = $base;
+                $candidates[] = (string) preg_replace('/(\.(?:jpe?g|png))$/i', '-scaled$1', $base);
+                $candidates[] = (string) preg_replace('/-scaled(\.(?:jpe?g|png))$/i', '$1', $relative);
+                $candidates = array_values(array_unique(array_filter($candidates)));
+
+                $placeholders = implode(',', array_fill(0, count($candidates), '%s'));
+                // phpcs:ignore WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare
+                $ids = $wpdb->get_col($wpdb->prepare(
+                        "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '_wp_attached_file' AND meta_value IN ($placeholders)",
+                        $candidates
+                ));
+
+                $filename = wp_basename($path);
+                $found = [];
+                foreach ((array) $ids as $id) {
+                        $id = (int) $id;
+                        $attached = get_attached_file($id, true);
+                        if (is_string($attached) && wp_normalize_path($attached) === $path) {
+                                $found[] = $id;
+                                continue;
+                        }
+
+                        $metadata = wp_get_attachment_metadata($id);
+                        if (!is_array($metadata)) {
+                                continue;
+                        }
+                        if (!empty($metadata['original_image']) && $metadata['original_image'] === $filename) {
+                                $found[] = $id;
+                                continue;
+                        }
+                        foreach ((array) ($metadata['sizes'] ?? []) as $size) {
+                                if (is_array($size) && isset($size['file']) && $size['file'] === $filename) {
+                                        $found[] = $id;
+                                        break;
+                                }
+                        }
+                }
+
+                return array_values(array_unique($found));
+        }
+
+        public function process_webp_queue(): void {
+                if (get_transient(self::WEBP_QUEUE_LOCK)) {
+                        return;
+                }
+                set_transient(self::WEBP_QUEUE_LOCK, 1, 5 * MINUTE_IN_SECONDS);
+
+                $this->settings = $this->get_settings();
+
+                $queue = get_option(self::WEBP_QUEUE_OPTION, []);
+                if (!is_array($queue) || empty($queue)) {
+                        delete_option(self::WEBP_QUEUE_OPTION);
+                        delete_transient(self::WEBP_QUEUE_LOCK);
+                        return;
+                }
+
+                $failed = get_option(self::WEBP_QUEUE_FAILED_OPTION, []);
+                if (!is_array($failed)) {
+                        $failed = [];
+                }
+
+                $started = time();
+                $done = 0;
+                foreach ($queue as $original => $webp) {
+                        if ($done >= self::WEBP_QUEUE_BATCH || (time() - $started) >= self::WEBP_QUEUE_TIME_BUDGET) {
+                                break;
+                        }
+                        unset($queue[$original]);
+                        $done++;
+
+                        $original = (string) $original;
+                        $webp = (string) $webp;
+                        if (!file_exists($original)) {
+                                unset($failed[$original]);
+                                continue;
+                        }
+
+                        if ($this->convert_queued_original($original, $webp)) {
+                                unset($failed[$original]);
+                        } elseif (file_exists($original)) {
+                                $failed[$original] = (int) ($failed[$original] ?? 0) + 1;
+                        }
+                }
+
+                // Mantém o registro de falhas limitado (descarta as mais antigas).
+                if (count($failed) > self::WEBP_QUEUE_MAX) {
+                        $failed = array_slice($failed, -self::WEBP_QUEUE_MAX, null, true);
+                }
+
+                update_option(self::WEBP_QUEUE_FAILED_OPTION, $failed, false);
+                if (empty($queue)) {
+                        delete_option(self::WEBP_QUEUE_OPTION);
+                } else {
+                        update_option(self::WEBP_QUEUE_OPTION, $queue, false);
+                        if (!wp_next_scheduled(self::WEBP_QUEUE_HOOK)) {
+                                wp_schedule_single_event(time() + 60, self::WEBP_QUEUE_HOOK);
+                        }
+                }
+
+                delete_transient(self::WEBP_QUEUE_LOCK);
         }
         public function handle_mlgp_items_stored(array $items, int $gallery_id): void {
                 $this->settings = $this->get_settings();
@@ -1331,6 +1634,18 @@ final class ML_Media_Master {
                                 $metadata['sizes'][$size_key]['mime-type'] = 'image/webp';
                                 $metadata['sizes'][$size_key]['filesize'] = (int) @filesize($sub_webp);
                                 $originals_to_delete[] = $sub_original;
+                        }
+                }
+
+                // 2.10.2: com o redimensionamento do WordPress ligado (disable_wp_big_image_scale
+                // desligado), o arquivo anexado é o "-scaled" e o JPG/PNG enviado fica guardado em
+                // metadata['original_image']. Ele também é original e sai junto, depois que o WebP
+                // principal foi validado acima; a referência no metadata é removida.
+                if (!empty($this->settings['delete_original']) && !empty($metadata['original_image']) && is_string($metadata['original_image'])) {
+                        $kept_original = trailingslashit($original_dir) . wp_basename($metadata['original_image']);
+                        if (preg_match('/\.(jpe?g|png)$/i', $kept_original) && $kept_original !== $webp_file) {
+                                $originals_to_delete[] = $kept_original;
+                                unset($metadata['original_image']);
                         }
                 }
 
@@ -1756,6 +2071,13 @@ final class ML_Media_Master {
                 if (!$this->has_any_conversion_engine()) {
                         $result['message'] = 'Dependências indisponíveis: nem shell nem fallback PHP disponível.';
                         return $result;
+                }
+
+                // 2.10.2: wp_tempnam() mora em wp-admin/includes/file.php, que o WordPress só
+                // carrega no painel. Fora dele (front-end, WP-Cron, REST, ML Gallery Pro) a chamada
+                // dava erro fatal "Call to undefined function wp_tempnam()".
+                if (!function_exists('wp_tempnam')) {
+                        require_once ABSPATH . 'wp-admin/includes/file.php';
                 }
 
                 $temp_source = wp_tempnam($input);

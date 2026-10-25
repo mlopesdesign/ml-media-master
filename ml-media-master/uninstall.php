@@ -8,6 +8,8 @@ $mlmm_options = [
     'ml_media_master_settings',
     'ml_media_master_license_state',
     'ml_media_master_version_seen',
+    'mlmm_webp_queue',
+    'mlmm_webp_queue_failed',
 ];
 
 foreach ($mlmm_options as $option_name) {
@@ -22,6 +24,7 @@ foreach ($mlmm_options as $option_name) {
 $mlmm_transients = [
     'ml_media_master_admin_toast',
     'mlmm_github_release_cache',
+    'mlmm_webp_queue_lock',
 ];
 
 foreach ($mlmm_transients as $transient_name) {
@@ -73,3 +76,6 @@ delete_transient('ml_media_master_batch_notice');
 // 2.10.0: licença pelo site tools — a licença local fica (reinstalar recupera); só a
 // renovação diária é desagendada.
 wp_clear_scheduled_hook('mllc_ml_media_master_refresh');
+
+// 2.10.2: fila de conversão WebP em segundo plano.
+wp_clear_scheduled_hook('mlmm_process_webp_queue');
