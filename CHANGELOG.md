@@ -10,6 +10,18 @@ with this file.
 
 ---
 
+## [2.10.2] - 2026-10-25
+
+### Corrigido
+- Crítico: `maybe_swap_upload_url_to_webp()` (filtros `wp_get_attachment_url`, `wp_get_attachment_image_src`, `wp_calculate_image_srcset`, `the_content`, `render_block` etc.) convertia para WebP de forma síncrona durante a renderização; fora do wp-admin dava erro fatal `Call to undefined function wp_tempnam()` (HTTP 500 no front-end, visto em produção) e repetia conversões falhas a cada visita.
+- Front só troca a URL se o WebP existe. Original sem WebP (ou com WebP irmão + JPG ainda no disco e `delete_original` ligado) vai para a fila `mlmm_webp_queue`, processada por `mlmm_process_webp_queue` (WP-Cron): 10 por lote, orçamento de tempo limitado por `max_execution_time`, trava atômica (`INSERT IGNORE` em `mlmm_webp_queue_lock`; trava de processo morto > 10 min é tomada), progresso e tentativa gravados por item antes de converter (fatal conta tentativa; máx. 3 em `mlmm_webp_queue_failed`).
+- Fila → anexo: mesmo caminho do upload (`fix_metadata_after_webp`); anexos já em WebP com tamanho/original JPG que sobrou → `finish_webp_attachment()`; anexos duplicados → `relink_attachment_to_existing_webp()`. Sucesso só quando nenhum anexo aponta mais para o arquivo. Arquivo solto em uploads (sem anexo): gera o WebP e apaga o original (`delete_original`); o 404 do .jpg/.png redireciona ao .webp. ML Gallery Pro (`wp-content/ml-gallery`): conversão + religação da tabela + exclusão no upload (`mlgp_after_items_stored`), sem mudança. GIF nunca é convertido.
+- WebP de mesmo nome que pertence a outro anexo (`webp_owned_by_other_attachment()`) ou que não passa em `is_real_webp()` (truncado/animado) nunca é reaproveitado, apagado ou sobrescrito: a conversão daquele arquivo falha e nada muda. Arquivo solto é apagado uma única vez (`mlmm_webp_queue_deleted`): se um gerador de miniatura sob demanda o recriar, ele fica. Registro separado `mlmm_webp_queue_kept` para convertidos que mantêm o original (Remoção segura desligada).
+- Travessia de diretório: caminhos resolvidos com `realpath()` e aceitos só dentro de uploads (fila, cron e redirect 404).
+- Validação real antes de apagar qualquer original (`is_real_webp()`: assinatura WebP, dimensões e decodificação GD). WebP truncado existente é refeito. Tamanhos gravados em temporário + `rename`.
+- Upload com redimensionamento do WP: o JPG/PNG de `metadata['original_image']` é apagado junto e sai do metadata; o 404 do nome original redireciona para `-scaled.webp`/`-rotated.webp`.
+- `wp_tempnam()` carregado fora do painel; desativação desagenda a fila; `uninstall.php` remove fila, falhas e trava.
+
 ## [2.10.1] - 2026-10-21
 
 ### Corrigido
